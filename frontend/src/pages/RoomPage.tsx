@@ -1,6 +1,6 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Send, Settings2, Sparkles, Trash2, Undo2, X } from "lucide-react";
 import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room, RoomDocument, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
@@ -8,6 +8,32 @@ import VoteCard, { Vote } from "../components/VoteCard";
 const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
 const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
 const emptyUsage: RoomUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_estimate: 0, cost_configured: false };
+
+type SpeechAlternative = { transcript: string };
+type SpeechResult = ArrayLike<SpeechAlternative> & { isFinal: boolean };
+type SpeechResultEvent = { results: ArrayLike<SpeechResult> };
+type SpeechErrorEvent = { error?: string };
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((event: SpeechResultEvent) => void) | null;
+  onerror: ((event: SpeechErrorEvent) => void) | null;
+  onend: (() => void) | null;
+  start(): void;
+  stop(): void;
+  abort(): void;
+};
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+function getSpeechRecognitionConstructor() {
+  const browser = window as Window & {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  };
+  return browser.SpeechRecognition || browser.webkitSpeechRecognition;
+}
 
 function formatTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -53,6 +79,8 @@ export default function RoomPage() {
   const [prepOpen, setPrepOpen] = useState(true);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [composerValue, setComposerValue] = useState("");
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [voiceListening, setVoiceListening] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [linkCopied, setLinkCopied] = useState(false);
@@ -73,6 +101,8 @@ export default function RoomPage() {
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pressStart = useRef<{ x: number; y: number } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const voiceBaseDraftRef = useRef("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -80,6 +110,19 @@ export default function RoomPage() {
   const showCommands = commandEnd >= 0 && composerValue.slice(commandEnd).trim().length <= 8 && !composerValue.slice(commandEnd).trim().includes(" ") && composerValue.slice(0, commandEnd).trim() === "";
   const mentionMatch = composerValue.match(/@([^\s@]*)$/);
   const mentionOptions = useMemo(() => room?.members.filter((member) => member.nickname.toLowerCase().includes((mentionMatch?.[1] || "").toLowerCase())) || [], [room?.members, mentionMatch?.[1]]);
+
+  useEffect(() => {
+    setVoiceSupported(Boolean(getSpeechRecognitionConstructor()));
+    return () => {
+      const recognition = voiceRecognitionRef.current;
+      voiceRecognitionRef.current = null;
+      recognition?.abort();
+    };
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (room?.closed_at) voiceRecognitionRef.current?.abort();
+  }, [room?.closed_at]);
 
   const applyMessage = useCallback((message: Message) => {
     setMessages((current) => current.some((item) => item.id === message.id) ? current.map((item) => item.id === message.id ? message : item) : [...current, message]);
@@ -267,9 +310,71 @@ export default function RoomPage() {
     typingTimer.current = setTimeout(() => sendTyping(false), 2800);
   }
 
+  function toggleVoiceInput() {
+    const runningRecognition = voiceRecognitionRef.current;
+    if (runningRecognition) {
+      try {
+        runningRecognition.stop();
+      } catch {
+        runningRecognition.abort();
+        voiceRecognitionRef.current = null;
+        setVoiceListening(false);
+      }
+      return;
+    }
+    const SpeechRecognition = getSpeechRecognitionConstructor();
+    if (!SpeechRecognition) {
+      setError("当前浏览器暂不支持语音输入，请使用键盘输入。");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "zh-CN";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    voiceBaseDraftRef.current = composerValue.trim()
+      ? `${composerValue.trimEnd()}\n`
+      : "";
+    recognition.onresult = (event) => {
+      const transcript = Array.from(
+        { length: event.results.length },
+        (_, index) => event.results[index]?.[0]?.transcript || "",
+      ).join("").trimStart();
+      const availableLength = Math.max(0, 2000 - voiceBaseDraftRef.current.length);
+      setComposerValue(`${voiceBaseDraftRef.current}${[...transcript].slice(0, availableLength).join("")}`);
+    };
+    recognition.onerror = (event) => {
+      const messages: Record<string, string> = {
+        "not-allowed": "浏览器未授予麦克风或语音识别权限，请检查站点权限。",
+        "service-not-allowed": "浏览器未开放语音识别服务，请检查浏览器设置。",
+        "no-speech": "没有听到语音，请重试。",
+        network: "语音识别服务连接失败，请检查网络后重试。",
+        "language-not-supported": "当前浏览器的语音识别服务不支持中文。",
+      };
+      if (voiceRecognitionRef.current === recognition) voiceRecognitionRef.current = null;
+      setError(messages[event.error || ""] || "语音输入暂时不可用，请改用键盘输入。");
+      setVoiceListening(false);
+    };
+    recognition.onend = () => {
+      if (voiceRecognitionRef.current === recognition) voiceRecognitionRef.current = null;
+      setVoiceListening(false);
+    };
+    voiceRecognitionRef.current = recognition;
+    setError("");
+    setVoiceListening(true);
+    try {
+      recognition.start();
+    } catch {
+      voiceRecognitionRef.current = null;
+      setVoiceListening(false);
+      setError("无法启动语音输入，请检查浏览器麦克风权限后重试。");
+    }
+  }
+
   async function submitMessage(event?: FormEvent) {
     event?.preventDefault();
-    if (!identity || room?.closed_at || sending || (!composerValue.trim() && !selectedImage)) return;
+    if (!identity || room?.closed_at || sending || voiceListening || (!composerValue.trim() && !selectedImage)) return;
     if (/^\/结束(?:\s|$)/.test(composerValue.trim())) {
       if (!identity.owner_token) setError("只有房主可以结束讨论。");
       else await startFinishReview();
@@ -759,16 +864,17 @@ export default function RoomPage() {
           <form className="composer" onSubmit={(event) => void submitMessage(event)}>
             <div className="composer-tools">
               <label className={`icon-btn attach ${room.closed_at ? "disabled" : ""}`} title={room.closed_at ? "讨论已结束" : "添加图片"}><ImagePlus size={17} /><input type="file" disabled={Boolean(room.closed_at)} accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => { const file = event.target.files?.[0]; if (file && file.size <= 5 * 1024 * 1024) setSelectedImage(file); else if (file) setError("图片大小不能超过 5MB"); event.currentTarget.value = ""; }} /></label>
-              <button type="button" className="icon-btn" title="快捷指令" disabled={Boolean(room.closed_at)} onClick={() => { setComposerValue("/"); composerRef.current?.focus(); }}><Command size={16} /></button>
+              <button type="button" className="icon-btn" title="快捷指令" disabled={Boolean(room.closed_at) || voiceListening} onClick={() => { setComposerValue("/"); composerRef.current?.focus(); }}><Command size={16} /></button>
+              <button type="button" className={`icon-btn voice-btn ${voiceListening ? "voice-listening" : ""}`} title={!voiceSupported ? "当前浏览器不支持语音识别" : voiceListening ? "结束语音输入" : "中文语音输入；部分浏览器可能会联网处理音频"} aria-label={voiceListening ? "结束语音输入" : "开始中文语音输入"} aria-pressed={voiceListening} disabled={Boolean(room.closed_at) || !voiceSupported} onClick={toggleVoiceInput}><Mic size={16} /></button>
             </div>
             <div className="composer-input">
               {showCommands && <div className="suggest suggest-cmd">{commands.filter((command) => command.startsWith(composerValue.slice(commandEnd))).map((command) => <button type="button" onClick={() => void selectCommand(command)} key={command}><span>{command}</span><small>RoomAI 快捷指令</small></button>)}</div>}
               {mentionMatch && mentionOptions.length > 0 && <div className="suggest suggest-mention"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-sm avatar-ai"><Sparkles size={12} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className="avatar avatar-sm">{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
-              <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} disabled={Boolean(room.closed_at)} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder={room.closed_at ? "讨论已结束" : "说说你的想法…（输入 / 查看指令，@ 提及伙伴）"} />
+              <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} disabled={Boolean(room.closed_at) || voiceListening} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder={room.closed_at ? "讨论已结束" : voiceListening ? "正在聆听…点击麦克风结束后可编辑" : "说说你的想法…（输入 / 查看指令，@ 提及伙伴）"} />
             </div>
-            <button className="send-btn" disabled={Boolean(room.closed_at) || sending || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={17} className="spin" /> : <Send size={16} />}</button>
+            <button className="send-btn" disabled={Boolean(room.closed_at) || sending || voiceListening || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={17} className="spin" /> : <Send size={16} />}</button>
           </form>
-          <div className="composer-hint"><span>图片最大 5MB</span><span><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span></div>
+          <div className="composer-hint"><span>{voiceListening ? "正在聆听，点击麦克风结束" : voiceSupported ? "语音识别由浏览器提供，部分浏览器可能会联网处理音频" : "图片最大 5MB"}</span><span className="composer-shortcuts"><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span></div>
         </div>
       </section>
     </section>
