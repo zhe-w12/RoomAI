@@ -79,6 +79,7 @@ export default function RoomPage() {
   const [prepOpen, setPrepOpen] = useState(true);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [composerValue, setComposerValue] = useState("");
+  const [draftHydrated, setDraftHydrated] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
   const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "reconnecting" | "disconnected">("connecting");
@@ -115,6 +116,27 @@ export default function RoomPage() {
   const mentionOptions = useMemo(() => room?.members.filter((member) => member.nickname.toLowerCase().includes((mentionMatch?.[1] || "").toLowerCase())) || [], [room?.members, mentionMatch?.[1]]);
 
   useEffect(() => {
+    if (!identity || identity.session_id !== sessionId) return;
+    try {
+      setComposerValue(localStorage.getItem(`roomai:draft:${sessionId}:${identity.visitor_id}`) || "");
+    } catch {
+      setComposerValue("");
+    }
+    setDraftHydrated(true);
+  }, [identity?.session_id, identity?.visitor_id, sessionId]);
+
+  useEffect(() => {
+    if (!draftHydrated || !identity || identity.session_id !== sessionId) return;
+    const key = `roomai:draft:${sessionId}:${identity.visitor_id}`;
+    try {
+      if (composerValue) localStorage.setItem(key, composerValue);
+      else localStorage.removeItem(key);
+    } catch {
+      // Keep editing available when browser storage is disabled or full.
+    }
+  }, [composerValue, draftHydrated, identity?.session_id, identity?.visitor_id, sessionId]);
+
+  useEffect(() => {
     setVoiceSupported(Boolean(getSpeechRecognitionConstructor()));
     return () => {
       const recognition = voiceRecognitionRef.current;
@@ -142,11 +164,18 @@ export default function RoomPage() {
     let canceled = false;
     async function load() {
       lastMessageIdRef.current = 0;
+      setDraftHydrated(false);
       setLoading(true);
       setRoomError("");
       const storedIdentity = loadIdentity(sessionId);
       if (!storedIdentity) {
-        if (!canceled) setLoading(false);
+        if (!canceled) {
+          setIdentity(null);
+          setRoom(null);
+          setMessages([]);
+          setComposerValue("");
+          setLoading(false);
+        }
         return;
       }
       setIdentity(storedIdentity);
