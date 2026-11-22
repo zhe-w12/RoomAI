@@ -117,7 +117,7 @@ export type ReplayEvent = {
 };
 
 export type RoomSearchResult = {
-  type: "message" | "idea" | "summary";
+  type: "message" | "idea" | "summary" | "report";
   id: number;
   title: string;
   excerpt: string;

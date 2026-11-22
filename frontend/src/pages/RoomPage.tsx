@@ -864,6 +864,10 @@ export default function RoomPage() {
   function selectSearchResult(result: RoomSearchResult) {
     setSearchOpen(false);
     setSearch("");
+    if (result.type === "report") {
+      navigate(`/room/${sessionId}/memo`);
+      return;
+    }
     if (result.source_message_id) {
       window.setTimeout(() => jumpToMessage(result.source_message_id!), 80);
     } else {
@@ -1099,8 +1103,8 @@ export default function RoomPage() {
       {searchOpen && <>
         <div className="searchbar"><Search size={16} /><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索消息、想法或总结…" /><span>{searchLoading ? "搜索中…" : searchError || (search.trim() ? `${searchResults.length} 条结果` : "输入关键词搜索")}</span><button className="icon-btn" onClick={() => { setSearchOpen(false); setSearch(""); }} aria-label="关闭搜索"><X size={15} /></button></div>
         {search.trim() && <div className="search-results" aria-label="房间搜索结果">
-          {searchLoading && !searchResults.length ? <p className="search-empty">正在搜索消息、想法和总结…</p> : searchError ? <p className="search-empty search-empty-error">{searchError}</p> : searchResults.length ? searchResults.map((result) => <button className="search-result" key={`${result.type}-${result.id}`} onClick={() => selectSearchResult(result)}>
-            <span className={`search-result-type search-result-${result.type}`}>{result.type === "message" ? "消息" : result.type === "idea" ? "想法" : "总结"}</span>
+          {searchLoading && !searchResults.length ? <p className="search-empty">正在搜索消息、想法、总结和纪要…</p> : searchError ? <p className="search-empty search-empty-error">{searchError}</p> : searchResults.length ? searchResults.map((result) => <button className="search-result" key={`${result.type}-${result.id}`} onClick={() => selectSearchResult(result)}>
+            <span className={`search-result-type search-result-${result.type}`}>{result.type === "message" ? "消息" : result.type === "idea" ? "想法" : result.type === "report" ? "纪要" : "总结"}</span>
             <span className="search-result-copy"><b>{result.title}{result.type === "idea" && result.score != null ? ` · ${result.score.toFixed(1)}/5` : ""}</b><small>{result.excerpt || "没有可显示的摘要"}</small></span>
             <time>{formatTime(result.created_at)}</time>
           </button>) : !searchLoading && <p className="search-empty">没有找到匹配内容。</p>}

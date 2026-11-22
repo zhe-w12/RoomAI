@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     reply_to_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     image_path TEXT,
+    image_summary TEXT NOT NULL DEFAULT '',
     is_recalled INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
@@ -237,6 +238,9 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE ideas ADD COLUMN strengths TEXT NOT NULL DEFAULT ''")
         if "tradeoffs" not in idea_columns:
             connection.execute("ALTER TABLE ideas ADD COLUMN tradeoffs TEXT NOT NULL DEFAULT ''")
+        message_columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+        if "image_summary" not in message_columns:
+            connection.execute("ALTER TABLE messages ADD COLUMN image_summary TEXT NOT NULL DEFAULT ''")
         report_columns = {row[1] for row in connection.execute("PRAGMA table_info(room_reports)")}
         if "proposal_markdown" not in report_columns:
             connection.execute("ALTER TABLE room_reports ADD COLUMN proposal_markdown TEXT NOT NULL DEFAULT ''")

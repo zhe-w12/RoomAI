@@ -146,11 +146,14 @@ def history_message(item: dict) -> dict:
     text = f"{item.get('sender_name', '成员')}: {item.get('content') or ''}"
     if item.get("reply_content"):
         text += f"\n（回复 {item.get('reply_sender_name', '成员')}：{item['reply_content']}）"
+    image_summary = str(item.get("image_summary") or "").strip()
     image = _image_content(item["image_path"]) if item.get("image_path") and not item.get("is_recalled") else None
     if image:
+        if image_summary:
+            text += f"\n（此前整理的图片说明：{image_summary}）"
         return {"role": role, "content": [{"type": "text", "text": text}, image]}
     if item.get("image_path") and not item.get("is_recalled"):
-        text += "（消息附有图片；图片文件已不可用）"
+        text += f"（图片摘要：{image_summary}）" if image_summary else "（消息附有图片；图片文件已不可用）"
     return {"role": role, "content": text}
 
 
@@ -184,7 +187,10 @@ async def answer_room_prompt(
             f"\n滚动总结：{summary}"
         )
     if structured_context:
-        system += f"\n结构化记录：{structured_context}"
+        system += (
+            "\n结构化记录：" + structured_context
+            + "\nolder_image_summaries 是更早讨论图片的文字摘要；可用于找回讨论中的视觉资料，但不要据此声称图片摘要没有描述的细节。"
+        )
     if member_names:
         system += (
             "\n如果用户是在提问，请查看结构化想法记录中的 proposer_name，判断是否有成员曾提出相关想法；"

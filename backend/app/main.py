@@ -298,6 +298,7 @@ def get_message(connection, session_id: str, message_id: int) -> dict:
 def message_dict(row) -> dict:
     item = dict(row)
     image_path = item.pop("image_path", None)
+    item.pop("image_summary", None)
     item["todo_ids"] = [int(value) for value in (item.pop("todo_ids_raw", "") or "").split(",") if value.isdigit()]
     if item["is_recalled"]:
         item["content"] = ""
@@ -1267,10 +1268,10 @@ def search_room(session_id: str, visitor_id: str, q: str = Query(min_length=1, m
     query = f"%{needle}%"
     with database() as connection:
         messages = connection.execute(
-            """SELECT id, sender_name AS title, content AS excerpt, created_at, id AS source_message_id
-               FROM messages WHERE session_id = ? AND is_recalled = 0 AND (content LIKE ? OR sender_name LIKE ?)
+            """SELECT id, sender_name AS title, content, image_summary, created_at, id AS source_message_id
+               FROM messages WHERE session_id = ? AND is_recalled = 0 AND (content LIKE ? OR sender_name LIKE ? OR image_summary LIKE ?)
                ORDER BY id DESC LIMIT 30""",
-            (session_id, query, query),
+            (session_id, query, query, query),
         ).fetchall()
         ideas = connection.execute(
             """SELECT i.id, i.title, i.description AS excerpt, i.updated_at AS created_at, i.source_message_id,
@@ -1282,7 +1283,19 @@ def search_room(session_id: str, visitor_id: str, q: str = Query(min_length=1, m
             "SELECT version AS id, content, through_message_id AS source_message_id, created_at FROM summaries WHERE session_id = ? AND content LIKE ? ORDER BY version DESC LIMIT 20",
             (session_id, query),
         ).fetchall()
-    results = [{"type": "message", **dict(row)} for row in messages]
+        reports = connection.execute(
+            """SELECT minutes_markdown, proposal_markdown, retrospective_markdown, created_at
+               FROM room_reports WHERE session_id = ? AND
+               (minutes_markdown LIKE ? OR proposal_markdown LIKE ? OR retrospective_markdown LIKE ?)""",
+            (session_id, query, query, query),
+        ).fetchall()
+    results = []
+    for row in messages:
+        item = dict(row)
+        content = item.pop("content") or ""
+        image_summary = item.pop("image_summary") or ""
+        item["excerpt"] = content if needle.casefold() in content.casefold() else image_summary or content
+        results.append({"type": "message", **item})
     for row in ideas:
         item = dict(row)
         dimensions = json.loads(item.pop("dimensions") or "{}")
@@ -1307,6 +1320,11 @@ def search_room(session_id: str, visitor_id: str, q: str = Query(min_length=1, m
         position = text.casefold().find(needle.casefold())
         excerpt = text[max(0, position - 80) : max(0, position - 80) + 240] if position >= 0 else text[:240]
         results.append({"type": "summary", "id": row["id"], "title": f"讨论总结 v{row['id']}", "excerpt": excerpt, "created_at": row["created_at"], "source_message_id": row["source_message_id"]})
+    for row in reports:
+        text = "\n".join((row["minutes_markdown"], row["proposal_markdown"], row["retrospective_markdown"]))
+        position = text.casefold().find(needle.casefold())
+        excerpt = text[max(0, position - 80) : max(0, position - 80) + 240] if position >= 0 else text[:240]
+        results.append({"type": "report", "id": 1, "title": "讨论纪要与复盘", "excerpt": excerpt, "created_at": row["created_at"], "source_message_id": None})
     results.sort(key=lambda item: item["created_at"])
     return {"results": results[-50:]}
 
@@ -1597,11 +1615,17 @@ async def generate_agent_reply(
             return
         with database() as connection:
             history = [dict(row) for row in connection.execute(
-                """SELECT m.sender_name, m.sender_type, m.content, m.image_path, m.is_recalled,
+                """SELECT m.id, m.sender_name, m.sender_type, m.content, m.image_path, m.image_summary, m.is_recalled,
                           r.sender_name AS reply_sender_name, r.content AS reply_content
                    FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id
                    WHERE m.session_id = ? ORDER BY m.id DESC LIMIT 30""",
                 (session_id,),
+            ).fetchall()]
+            oldest_history_id = min((int(item["id"]) for item in history), default=0)
+            image_summaries = [dict(row) for row in connection.execute(
+                """SELECT id, sender_name, image_summary, created_at FROM messages
+                   WHERE session_id = ? AND id < ? AND image_summary <> '' ORDER BY id DESC LIMIT 30""",
+                (session_id, oldest_history_id),
             ).fetchall()]
             summary_row = connection.execute(
                 "SELECT content FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
@@ -1614,7 +1638,11 @@ async def generate_agent_reply(
             ).fetchall()]
         history.reverse()
         summary_context = json.loads(summary_row["content"]) if summary_row else None
-        structured_context = json.dumps([dict(row) for row in idea_rows], ensure_ascii=False) if idea_rows else None
+        context_data = {
+            "ideas": [dict(row) for row in idea_rows],
+            "older_image_summaries": image_summaries,
+        }
+        structured_context = json.dumps(context_data, ensure_ascii=False) if idea_rows or image_summaries else None
         answer = None
         if prompt == "__HELP__":
             answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/联网评估 结合外部资料核对方向；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/用户视角 模拟目标用户的需求和顾虑；/待办提取下一步。发散阶段也可以点输入区的眼睛图标匿名提想法。也可以直接 @RoomAI 提问；房间资料会按问题自动检索。"

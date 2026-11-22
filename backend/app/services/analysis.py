@@ -100,6 +100,11 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             "SELECT id, title, assignee, status, due_at FROM todos WHERE session_id = ? ORDER BY id DESC LIMIT 30",
             (session_id,),
         ).fetchall()
+        existing_image_summaries = connection.execute(
+            """SELECT id AS message_id, sender_name, image_summary, created_at FROM messages
+               WHERE session_id = ? AND image_summary <> '' ORDER BY id DESC LIMIT 30""",
+            (session_id,),
+        ).fetchall()
         members = [row["nickname"] for row in connection.execute(
             "SELECT nickname FROM visitors WHERE session_id = ?", (session_id,)
         ).fetchall()]
@@ -115,9 +120,15 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "phase": room["phase"],
         "known_ideas": [dict(item) for item in existing_ideas],
         "known_todos": [dict(item) for item in existing_todos],
+        "known_image_summaries": [dict(item) for item in existing_image_summaries],
         "member_names": members,
         "messages": [
-            {"sender": item["sender_name"], "content": item["content"], "id": item["id"]}
+            {
+                "sender": item["sender_name"],
+                "content": item["content"],
+                "id": item["id"],
+                "has_image": bool(item.get("image_path") and not item.get("is_recalled")),
+            }
             for item in recent
         ],
     }
@@ -137,11 +148,14 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称；"
         "如果来源消息的 sender 是‘匿名成员’，proposer_name 必须填写‘匿名成员’，绝不能猜测身份；"
         "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务，待办 source_message_id 也必须来自输入消息 id。"
+        "对 recent messages 中 has_image=true 的消息，为每张图片写一句客观、简短的 image_summaries 描述；无法辨认时留空。"
+        "image_summaries.message_id 必须来自这些带图片的消息 id，不要对同一张图片猜测图片外的信息。"
         "待办应尽量关联 known_todos 中的 todo_id；只有消息里明确提到时才给负责人和截止日期，状态可为 open、done 或 dropped。"
         "只返回 JSON，格式为："
         '{"summary":{"consensus":["..."],"disagreements":["..."],"decision_points":["..."],"todos":[{"todo_id":1,"title":"...","assignee":"","status":"open","due_at":"YYYY-MM-DD","source_message_id":1}],'
         '"atmosphere":{"state":"active|steady|quiet|tense","confidence":0.0,"evidence":"...","adjustment":"..."},'
         '"dimension_coverage":{"user":false,"technology":false,"time":false,"cost":false,"risk":false},"guide_question":"","phase_suggestion":null},'
+        '"image_summaries":[{"message_id":1,"description":"..."}],'
         '"ideas":[{"title":"...","description":"...","proposer_name":"","source_message_id":1,"merge_into":null,'
         f'"dimensions":{dimension_schema},"rationale":"...","strengths":"...","tradeoffs":"..."}}]}}。'
         "ideas 最多 5 个；没有就返回空数组。每个评分都应有简短理由，证据不足时 dimensions 返回空对象。"
@@ -154,15 +168,20 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
     # Include recent uploaded images as multimodal inputs when available.
     multimodal = [history_message(item) for item in recent]
     if any(isinstance(item.get("content"), list) for item in multimodal):
+        image_parts = []
+        for source_message, formatted in zip(recent, multimodal):
+            if isinstance(formatted.get("content"), list):
+                image_parts.extend([
+                    {"type": "text", "text": f"这张图片来自消息 #{source_message['id']}（{source_message['sender_name']}）。"},
+                    *[
+                        part
+                        for part in formatted["content"]
+                        if part.get("type") == "image_url"
+                    ],
+                ])
         messages[1]["content"] = [
             {"type": "text", "text": json.dumps(prompt, ensure_ascii=False)},
-            *[
-                part
-                for message in multimodal
-                if isinstance(message.get("content"), list)
-                for part in message["content"]
-                if part.get("type") == "image_url"
-            ],
+            *image_parts,
         ]
     result = None
     payload = None
@@ -181,6 +200,21 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
     if not isinstance(summary_data, dict):
         return None
     valid_recent_ids = {int(item["id"]) for item in recent}
+    valid_image_ids = {
+        int(item["id"])
+        for item in recent
+        if item.get("image_path") and not item.get("is_recalled")
+    }
+    image_summaries: dict[int, str] = {}
+    raw_image_summaries = payload.get("image_summaries") if isinstance(payload, dict) else []
+    if isinstance(raw_image_summaries, list):
+        for item in raw_image_summaries:
+            if not isinstance(item, dict):
+                continue
+            message_id = item.get("message_id")
+            description = str(item.get("description", "")).strip()[:400]
+            if isinstance(message_id, int) and message_id in valid_image_ids and description:
+                image_summaries[message_id] = description
     valid_todo_ids = {int(item["id"]) for item in existing_todos}
     todos = []
     for item in summary_data.get("todos", []):
@@ -246,6 +280,11 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             "INSERT INTO summaries (session_id, version, content, through_message_id, created_at) VALUES (?, ?, ?, ?, ?)",
             (session_id, version, json.dumps(summary_data, ensure_ascii=False), latest_message, created_at),
         )
+        for message_id, description in image_summaries.items():
+            connection.execute(
+                "UPDATE messages SET image_summary = ? WHERE session_id = ? AND id = ?",
+                (description, session_id, message_id),
+            )
         valid_source_ids = valid_recent_ids
         known_member_names = set(members)
         for raw in (payload.get("ideas") or [])[:5]:
