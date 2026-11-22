@@ -154,6 +154,11 @@ export const api = {
     request<Identity>(`/api/rooms/${sessionId}/visitors`, { method: "POST", body: JSON.stringify({ nickname, password }) }),
   getRoom: (sessionId: string, visitorId: string) =>
     request<Room>(`/api/rooms/${sessionId}?visitor_id=${encodeURIComponent(visitorId)}`),
+  deleteRoom: (sessionId: string, identity: Identity) =>
+    request<{ ok: boolean }>(`/api/rooms/${sessionId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token }),
+    }),
   getMessages: (sessionId: string, visitorId: string, afterMessageId = 0) =>
     request<Message[]>(`/api/rooms/${sessionId}/messages?visitor_id=${encodeURIComponent(visitorId)}&after_message_id=${afterMessageId}`),
   getSummary: (sessionId: string, visitorId: string) =>

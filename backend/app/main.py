@@ -210,6 +210,11 @@ class DocumentDeleteRequest(BaseModel):
     owner_token: str | None = None
 
 
+class RoomDeleteRequest(BaseModel):
+    visitor_id: str
+    owner_token: str = Field(min_length=1)
+
+
 _idle_tasks: dict[str, asyncio.Task] = {}
 _analysis_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _message_rate: defaultdict[str, deque[float]] = defaultdict(deque)
@@ -907,6 +912,36 @@ def get_messages(session_id: str, visitor_id: str, after_message_id: int = Query
             (session_id, after_message_id),
         ).fetchall()
         return [message_dict(row) for row in rows]
+
+
+@app.delete("/api/rooms/{session_id}")
+async def delete_room(session_id: str, payload: RoomDeleteRequest) -> dict:
+    ensure_owner(session_id, payload.visitor_id, payload.owner_token)
+    with database() as connection:
+        vote_ids = [row["id"] for row in connection.execute(
+            "SELECT id FROM votes WHERE session_id = ?", (session_id,)
+        ).fetchall()]
+        cursor = connection.execute("DELETE FROM rooms WHERE session_id = ?", (session_id,))
+    if not cursor.rowcount:
+        raise HTTPException(status_code=404, detail="找不到这个房间")
+
+    await manager.broadcast(session_id, {"type": "room_deleted", "reason": "manual"})
+    idle_task = _idle_tasks.pop(session_id, None)
+    if idle_task and not idle_task.done():
+        idle_task.cancel()
+    for vote_id in vote_ids:
+        task = _vote_expiry_tasks.pop(vote_id, None)
+        if task and not task.done():
+            task.cancel()
+    for remove_files, label in (
+        (_safe_remove_room_uploads, "uploads"),
+        (_safe_remove_room_documents, "documents"),
+    ):
+        try:
+            remove_files(session_id)
+        except OSError:
+            logger.exception("Could not remove %s for a deleted room", label)
+    return {"ok": True}
 
 
 @app.get("/api/rooms/{session_id}/summary")

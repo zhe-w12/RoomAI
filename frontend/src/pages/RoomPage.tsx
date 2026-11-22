@@ -67,6 +67,9 @@ export default function RoomPage() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [roomDeleteOpen, setRoomDeleteOpen] = useState(false);
+  const [roomDeleting, setRoomDeleting] = useState(false);
+  const [roomDeleteError, setRoomDeleteError] = useState("");
   const [finishReviewOpen, setFinishReviewOpen] = useState(false);
   const [finishReview, setFinishReview] = useState<FinishReview | null>(null);
   const [finishReviewLoading, setFinishReviewLoading] = useState(false);
@@ -313,6 +316,7 @@ export default function RoomPage() {
           if (data.type === "room_closed") setRoom((current) => current ? { ...current, closed_at: data.closed_at as string } : current);
           if (data.type === "room_deleted") {
             localStorage.removeItem(`roomai:identity:${sessionId}`);
+          localStorage.removeItem(`roomai:draft:${sessionId}:${identity.visitor_id}`);
             navigate("/", { replace: true });
           }
         } catch {
@@ -803,6 +807,28 @@ export default function RoomPage() {
     }
   }
 
+  async function confirmDeleteRoom() {
+    if (!identity?.owner_token || !room || roomDeleting) return;
+    setRoomDeleting(true);
+    setRoomDeleteError("");
+    try {
+      await api.deleteRoom(sessionId, identity);
+      try {
+        localStorage.removeItem(`roomai:identity:${sessionId}`);
+        localStorage.removeItem(`roomai:draft:${sessionId}:${identity.visitor_id}`);
+      } catch {
+        // Removing stale local credentials is best-effort after the server deletes the room.
+      }
+      setRoomDeleteOpen(false);
+      setSettingsOpen(false);
+      navigate("/", { replace: true });
+    } catch (reason) {
+      setRoomDeleteError(reason instanceof Error ? reason.message : "删除房间失败，请重试。");
+    } finally {
+      setRoomDeleting(false);
+    }
+  }
+
   function selectMention(member: Member) {
     const current = composerValue.replace(/@[^\s@]*$/, `@${member.nickname} `);
     setComposerValue(current);
@@ -1031,6 +1057,20 @@ export default function RoomPage() {
         <div className="settings-block">
           {room.closed_at ? <a className="btn btn-primary btn-block" href={`/room/${sessionId}/memo`}><FileText size={15} />查看立项纪要</a> : identity.owner_token ? <button className="btn btn-primary btn-block" onClick={() => void startFinishReview()}><Check size={15} />结束讨论并生成纪要</button> : <p className="field-note">只有房主可以结束讨论并生成纪要。</p>}
         </div>
+        {identity.owner_token && <div className="settings-block danger-zone">
+          <button className="btn btn-block btn-danger-outline" onClick={() => { setRoomDeleteError(""); setSettingsOpen(false); setRoomDeleteOpen(true); }}><Trash2 size={15} />删除房间</button>
+          <p className="field-note">永久删除房间、消息、讨论资料和图片，删除后无法恢复。</p>
+        </div>}
+      </section>
+    </div>}
+    {roomDeleteOpen && <div className="overlay" onClick={() => !roomDeleting && setRoomDeleteOpen(false)}>
+      <section className="modal room-delete-modal" role="dialog" aria-modal="true" aria-labelledby="room-delete-title" onClick={(event) => event.stopPropagation()}>
+        <button className="icon-btn modal-close" disabled={roomDeleting} onClick={() => setRoomDeleteOpen(false)} aria-label="取消删除"><X size={17} /></button>
+        <p className="eyebrow">永久删除</p>
+        <h2 id="room-delete-title">删除「{room.topic}」？</h2>
+        <p className="room-delete-warning">这会永久清除房间里的消息、纪要、投票、图片和讨论资料，邀请链接也会立即失效。此操作无法撤销。</p>
+        {roomDeleteError && <p className="form-error">{roomDeleteError}</p>}
+        <div className="room-delete-actions"><button className="btn" disabled={roomDeleting} onClick={() => { setRoomDeleteOpen(false); setSettingsOpen(true); }}>保留房间</button><button className="btn btn-danger" disabled={roomDeleting} onClick={() => void confirmDeleteRoom()}>{roomDeleting ? <><span className="btn-spinner" />正在删除…</> : <><Trash2 size={15} />永久删除房间</>}</button></div>
       </section>
     </div>}
     {finishReviewOpen && <div className="overlay" onClick={() => !finishSaving && setFinishReviewOpen(false)}>
