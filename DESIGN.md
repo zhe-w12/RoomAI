@@ -322,6 +322,7 @@ Mermaid 图表（方案可视化）。
 | messages | id、session_id、visitor_id、sender_name、sender_type（user/agent）、content、reply_to_message_id（可空，引用回复）、is_recalled、recalled_at、created_at | 全量存库，是 Agent 的输入和追溯依据 |
 | mentions | id、message_id、session_id、mentioned_visitor_id、is_read、created_at | @提醒记录；点开或查看后标已读 |
 | ideas | id、session_id、proposer、content、status（讨论中/采纳/否决/待定）、first_message_id | 想法是结构化记忆的核心，状态流转要留痕 |
+| idea_status_history | id、idea_id、from_status、to_status、changed_by_visitor_id、created_at | 记录每次状态变化，并在讨论回放中展示 |
 | idea_votes | idea_id、visitor_id、stance（支持/反对/补充）、created_at | 谁支持、谁反对，纪要里能追溯 |
 | evaluations | id、session_id、idea_id、feasibility、cost、timeline、risk、innovation、team_fit（各 1–5 分）、reason、created_at | 六维打分 + 理由；分数是参考，理由才是给人看的 |
 | summaries | id、session_id、version、content（共识/分歧/待办）、based_on_message_ids、created_at | 每次触发产生一个新版本，不覆盖旧版 |

@@ -1109,15 +1109,24 @@ async def update_idea_status(session_id: str, idea_id: int, payload: IdeaStatusR
     if room["closed_at"]:
         raise HTTPException(status_code=409, detail="讨论已经结束，想法状态已锁定")
     with database() as connection:
-        cursor = connection.execute(
-            "UPDATE ideas SET status = ?, updated_at = ? WHERE session_id = ? AND id = ?",
-            (payload.status, now_iso(), session_id, idea_id),
-        )
-        if not cursor.rowcount:
+        idea = connection.execute(
+            "SELECT status FROM ideas WHERE session_id = ? AND id = ?", (session_id, idea_id)
+        ).fetchone()
+        if not idea:
             raise HTTPException(status_code=404, detail="找不到这个想法")
+        updated_at = now_iso()
+        if idea["status"] != payload.status:
+            connection.execute(
+                "INSERT INTO idea_status_history (idea_id, from_status, to_status, changed_by_visitor_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (idea_id, idea["status"], payload.status, visitor["visitor_id"], updated_at),
+            )
+            connection.execute(
+                "UPDATE ideas SET status = ?, updated_at = ? WHERE session_id = ? AND id = ?",
+                (payload.status, updated_at, session_id, idea_id),
+            )
         connection.execute(
             "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
-            (now_iso(), session_id),
+            (updated_at, session_id),
         )
     await manager.broadcast(session_id, {"type": "idea_update", "ideas": get_ideas_for_event(session_id)})
     return {"ideas": get_ideas_for_event(session_id, payload.visitor_id)}
@@ -1366,6 +1375,12 @@ def get_replay(session_id: str, visitor_id: str) -> dict:
             "SELECT id, title, outcome, created_at FROM decisions WHERE session_id = ? ORDER BY id",
             (session_id,),
         ).fetchall()
+        idea_status_events = connection.execute(
+            """SELECT h.id, h.from_status, h.to_status, h.created_at, i.title, i.source_message_id
+               FROM idea_status_history h JOIN ideas i ON i.id = h.idea_id
+               WHERE i.session_id = ? ORDER BY h.id""",
+            (session_id,),
+        ).fetchall()
     for item in messages:
         detail = "这条消息已撤回" if item["is_recalled"] else (item["content"] or "图片附件")
         events.append({"id": f"message-{item['id']}", "type": "message", "title": f"{item['sender_name']} 发言", "detail": detail[:500], "created_at": item["created_at"], "message_id": item["id"]})
@@ -1375,6 +1390,11 @@ def get_replay(session_id: str, visitor_id: str) -> dict:
         events.append({"id": f"summary-{item['version']}", "type": "summary", "title": f"滚动总结 v{item['version']}", "detail": detail[:500], "created_at": item["created_at"], "message_id": item["through_message_id"] or None})
     for item in ideas:
         events.append({"id": f"idea-{item['id']}", "type": "idea", "title": f"新增想法：{item['title']}", "detail": item["description"], "created_at": item["created_at"], "message_id": item["source_message_id"]})
+    status_labels = {"considering": "讨论中", "pending": "待定", "adopted": "已采纳", "rejected": "已否决"}
+    for item in idea_status_events:
+        previous = status_labels.get(item["from_status"], item["from_status"] or "未设置")
+        current = status_labels.get(item["to_status"], item["to_status"])
+        events.append({"id": f"idea-status-{item['id']}", "type": "idea_status", "title": f"想法状态：{item['title']}", "detail": f"{previous} → {current}", "created_at": item["created_at"], "message_id": item["source_message_id"]})
     for item in evaluations:
         dimensions = json.loads(item["dimensions"] or "{}")
         score = round(sum(dimensions.values()) / len(dimensions), 1) if dimensions else None

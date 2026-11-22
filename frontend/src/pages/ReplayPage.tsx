@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Activity, ArrowLeft, ArrowRight, CheckCircle2, Clock3, Lightbulb, ListTodo, MessageCircle, Sparkles, Vote as VoteIcon } from "lucide-react";
+import { Activity, ArrowLeft, ArrowRight, CheckCircle2, Clock3, Lightbulb, ListTodo, MessageCircle, RefreshCw, Sparkles, Vote as VoteIcon } from "lucide-react";
 import { api, loadIdentity, ReplayEvent } from "../lib/api";
 
 const eventMeta: Record<ReplayEvent["type"], { label: string; icon: typeof MessageCircle; color: string }> = {
   message: { label: "发言", icon: MessageCircle, color: "replay-blue" },
   summary: { label: "总结", icon: Sparkles, color: "replay-violet" },
   idea: { label: "想法", icon: Lightbulb, color: "replay-amber" },
+  idea_status: { label: "状态", icon: RefreshCw, color: "replay-green" },
   evaluation: { label: "评估", icon: Activity, color: "replay-green" },
   vote: { label: "投票", icon: VoteIcon, color: "replay-violet" },
   decision: { label: "决策", icon: CheckCircle2, color: "replay-green" },

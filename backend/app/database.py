@@ -80,6 +80,15 @@ CREATE TABLE IF NOT EXISTS ideas (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ideas_session_updated ON ideas(session_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS idea_status_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    changed_by_visitor_id TEXT REFERENCES visitors(visitor_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idea_status_history_idea_created ON idea_status_history(idea_id, created_at);
 CREATE TABLE IF NOT EXISTS evaluations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,

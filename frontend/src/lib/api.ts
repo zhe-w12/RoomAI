@@ -109,7 +109,7 @@ export type Todo = {
 
 export type ReplayEvent = {
   id: string;
-  type: "message" | "summary" | "idea" | "evaluation" | "vote" | "decision" | "todo";
+  type: "message" | "summary" | "idea" | "idea_status" | "evaluation" | "vote" | "decision" | "todo";
   title: string;
   detail: string;
   created_at: string;
