@@ -43,6 +43,7 @@ from .services.agent import COMMAND_PROMPTS, answer_room_prompt
 from .services.analysis import analyze_room
 from .services.report import generate_room_report, markdown_to_docx
 from .services.voting import propose_vote
+from .services.web_search import SearchNotConfigured, SearchUnavailable, search_web
 
 
 app = FastAPI(title="RoomAI API", version="0.1.0")
@@ -1236,9 +1237,22 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE)
         and re.search(r"总结|梳理共识|评估", content)
     )
+    is_research_request = content.startswith("/联网评估") or (
+        re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE)
+        and re.search(r"联网评估|联网检索", content)
+    )
     if is_vote_request:
         detail = content[len("/投票"):].strip() if content.startswith("/投票") else content
         asyncio.create_task(create_ai_vote(session_id, detail))
+    elif is_research_request:
+        detail = content.removeprefix("/联网评估").strip()
+        detail = re.sub(r"@(AI|RoomAI)\b", "", detail, flags=re.IGNORECASE)
+        detail = re.sub(r"^联网(?:评估|检索)", "", detail).strip(" ：:，,。")
+        asyncio.create_task(generate_agent_reply(
+            session_id,
+            prompt or COMMAND_PROMPTS["/联网评估"],
+            research_query=detail,
+        ))
     elif is_summary_request:
         asyncio.create_task(publish_room_analysis(session_id, auto_vote=False))
     elif content.startswith("/对比"):
@@ -1257,7 +1271,11 @@ def ai_prompt(content: str) -> str | None:
         detail = stripped[len(command):].strip()
         return f"{COMMAND_PROMPTS[command]}\n成员补充要求：{detail}" if detail else COMMAND_PROMPTS[command]
     if re.search(r"@(AI|RoomAI)\b", stripped, re.IGNORECASE):
-        return re.sub(r"@(AI|RoomAI)\b", "", stripped, flags=re.IGNORECASE).strip() or "请根据目前的讨论，整理共识与下一步。"
+        request = re.sub(r"@(AI|RoomAI)\b", "", stripped, flags=re.IGNORECASE).strip()
+        if re.match(r"^联网(?:评估|检索)", request):
+            detail = re.sub(r"^联网(?:评估|检索)", "", request).strip(" ：:，,。")
+            return f"{COMMAND_PROMPTS['/联网评估']}\n需要核对：{detail}" if detail else COMMAND_PROMPTS["/联网评估"]
+        return request or "请根据目前的讨论，整理共识与下一步。"
     return None
 
 
@@ -1317,7 +1335,12 @@ async def publish_idea_comparison(session_id: str) -> None:
         )
 
 
-async def generate_agent_reply(session_id: str, prompt: str) -> None:
+async def generate_agent_reply(
+    session_id: str,
+    prompt: str,
+    *,
+    research_query: str | None = None,
+) -> None:
     await manager.broadcast(
         session_id,
         {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": True},
@@ -1346,16 +1369,36 @@ async def generate_agent_reply(session_id: str, prompt: str) -> None:
         history.reverse()
         summary_context = json.loads(summary_row["content"]) if summary_row else None
         structured_context = json.dumps([dict(row) for row in idea_rows], ensure_ascii=False) if idea_rows else None
+        answer = None
         if prompt == "__HELP__":
-            answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/待办提取下一步。也可以直接 @RoomAI 提问。"
+            answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/联网评估 结合外部资料核对方向；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/待办提取下一步。也可以直接 @RoomAI 提问。"
         else:
-            answer = await answer_room_prompt(
-                room["topic"], history, prompt, model=room["model"], session_id=session_id,
-                phase=room["phase"],
-                summary=json.dumps(summary_context, ensure_ascii=False) if summary_context else None,
-                structured_context=structured_context,
-                member_names=member_names,
-            )
+            external_sources = None
+            if research_query is not None:
+                query = " ".join(research_query.split())[:500] or room["topic"]
+                try:
+                    external_sources = await search_web(f"{room['topic']} {query}")
+                except SearchNotConfigured:
+                    answer = "联网评估尚未配置检索服务。请在服务器 `.env` 中设置 `TAVILY_API_KEY` 后重试。"
+                except SearchUnavailable:
+                    answer = "联网检索暂时不可用，本次没有使用外部资料。你可以稍后重试，或使用 `/评估` 先按讨论内容评估。"
+                if external_sources == []:
+                    answer = "没有检索到可用来源。可以换更具体的关键词后重试，或使用 `/评估` 按讨论内容评估。"
+            if answer is None:
+                answer = await answer_room_prompt(
+                    room["topic"], history, prompt, model=room["model"], session_id=session_id,
+                    phase=room["phase"],
+                    summary=json.dumps(summary_context, ensure_ascii=False) if summary_context else None,
+                    structured_context=structured_context,
+                    member_names=member_names,
+                    external_sources=external_sources,
+                )
+                if answer and external_sources:
+                    answer += "\n\n**参考来源**\n" + "\n".join(
+                        f"- [来源 {index}] [{item['title']}]({item['url']})"
+                        + (f"（{item['published_date']}）" if item["published_date"] else "")
+                        for index, item in enumerate(external_sources, 1)
+                    )
             if answer:
                 suggestions = re.findall(r"\[\[suggest_mention:([^\]]+)\]\]", answer)
                 selected = next((name.strip() for name in reversed(suggestions) if name.strip() in member_names), None)

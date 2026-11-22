@@ -5,7 +5,7 @@ import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room,
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
 
-const commands = ["/总结", "/评估", "/投票", "/对比", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
+const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
 const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
 const emptyUsage: RoomUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_estimate: 0, cost_configured: false };
 
