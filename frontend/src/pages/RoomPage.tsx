@@ -1,13 +1,14 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Send, Settings2, Sparkles, Trash2, Undo2, X } from "lucide-react";
-import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
+import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Send, Settings2, Sparkles, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
+import { api, FinishReview, Identity, Idea, IdeaStatus, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
 
 const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/用户视角", "/待办", "/结束", "/帮助"];
 const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
 const atmosphereLabels = { active: "讨论活跃", steady: "节奏平稳", quiet: "讨论偏冷", tense: "存在明显分歧" } as const;
+const ideaStatusLabels: Record<IdeaStatus, string> = { considering: "讨论中", pending: "待定", adopted: "已采纳", rejected: "已否决" };
 const emptyUsage: RoomUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_estimate: 0, cost_configured: false };
 
 type SpeechAlternative = { transcript: string };
@@ -53,6 +54,7 @@ export default function RoomPage() {
   const [summary, setSummary] = useState<SummaryVersion | null>(null);
   const [summaryVersions, setSummaryVersions] = useState<SummaryVersion[]>([]);
   const [ideas, setIdeas] = useState<Idea[]>([]);
+  const [ideaVoteBusyIds, setIdeaVoteBusyIds] = useState<number[]>([]);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [documents, setDocuments] = useState<RoomDocument[]>([]);
   const [documentUploading, setDocumentUploading] = useState(false);
@@ -347,7 +349,12 @@ export default function RoomPage() {
             setSummaryVersions((current) => [nextSummary, ...current.filter((item) => item.version !== nextSummary.version)].slice(0, 20));
             void api.getUsage(sessionId, visitorId).then(setUsage).catch(() => undefined);
           }
-          if (data.type === "idea_update") setIdeas(data.ideas as Idea[]);
+          if (data.type === "idea_update") {
+            setIdeas((current) => (data.ideas as Idea[]).map((idea) => ({
+              ...idea,
+              my_stance: current.find((item) => item.id === idea.id)?.my_stance ?? idea.my_stance,
+            })));
+          }
           if (data.type === "vote_created") setVotes((current) => [...current.filter((vote) => vote.id !== data.vote.id), data.vote as Vote]);
           if (data.type === "vote_update") setVotes((current) => current.map((vote) => vote.id === data.vote.id ? { ...vote, ...(data.vote as Vote), my_option_id: vote.my_option_id } : vote));
           if (data.type === "todo_update") setTodos(data.todos as Todo[]);
@@ -758,6 +765,29 @@ export default function RoomPage() {
     }
   }
 
+  async function voteIdea(ideaId: number, stance: "support" | "oppose") {
+    if (!identity || room?.closed_at || ideaVoteBusyIds.includes(ideaId)) return;
+    setIdeaVoteBusyIds((current) => [...current, ideaId]);
+    try {
+      const result = await api.voteIdea(sessionId, ideaId, identity.visitor_id, stance);
+      setIdeas(result.ideas);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "更新想法投票失败");
+    } finally {
+      setIdeaVoteBusyIds((current) => current.filter((id) => id !== ideaId));
+    }
+  }
+
+  async function updateIdeaStatus(ideaId: number, status: IdeaStatus) {
+    if (!identity?.owner_token || room?.closed_at) return;
+    try {
+      const result = await api.updateIdeaStatus(sessionId, identity, ideaId, status);
+      setIdeas(result.ideas);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "更新想法状态失败");
+    }
+  }
+
   async function saveTodo(event: FormEvent) {
     event.preventDefault();
     if (!identity || !editingTodo || todoSaving) return;
@@ -969,9 +999,20 @@ export default function RoomPage() {
       </button>)}</div> : <p className="side-empty">讨论中明确的下一步会整理到这里。</p>}
 
       <div className="side-label-row"><p className="side-label">想法池</p><span className="count">{ideas.length}</span></div>
-      {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <button className="idea-item" key={idea.id} onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
-        <span className="idea-item-title">{idea.title}</span><span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}</span>
-      </button>)}</div> : <p className="side-empty">值得做的想法，会在讨论中浮现。</p>}
+      {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <div className="idea-item" key={idea.id}>
+        <button type="button" className="idea-item-main" onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
+          <span className="idea-item-title">{idea.title}</span>
+          <span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}</span>
+          <span className="idea-status-label">{ideaStatusLabels[idea.status]}</span>
+        </button>
+        <div className="idea-item-controls">
+          <button type="button" className={`idea-vote-button ${idea.my_stance === "support" ? "idea-vote-active" : ""}`} aria-pressed={idea.my_stance === "support"} disabled={Boolean(room.closed_at) || ideaVoteBusyIds.includes(idea.id)} onClick={() => void voteIdea(idea.id, "support")}><ThumbsUp size={12} />支持 {idea.support_count}</button>
+          <button type="button" className={`idea-vote-button ${idea.my_stance === "oppose" ? "idea-vote-active" : ""}`} aria-pressed={idea.my_stance === "oppose"} disabled={Boolean(room.closed_at) || ideaVoteBusyIds.includes(idea.id)} onClick={() => void voteIdea(idea.id, "oppose")}><ThumbsDown size={12} />反对 {idea.oppose_count}</button>
+          {identity.owner_token && <select aria-label={`设置“${idea.title}”的状态`} value={idea.status} disabled={Boolean(room.closed_at)} onChange={(event) => void updateIdeaStatus(idea.id, event.target.value as IdeaStatus)}>
+            <option value="considering">讨论中</option><option value="pending">待定</option><option value="adopted">已采纳</option><option value="rejected">已否决</option>
+          </select>}
+        </div>
+      </div>)}</div> : <p className="side-empty">值得做的想法，会在讨论中浮现。</p>}
 
       <div className="side-label-row document-heading">
         <p className="side-label">讨论资料</p>

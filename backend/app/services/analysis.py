@@ -278,12 +278,18 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             source_id = raw.get("source_message_id")
             if not isinstance(source_id, int) or source_id not in valid_source_ids:
                 source_id = None
+            source_message = next((item for item in recent if item["id"] == source_id), None)
             proposer = str(raw.get("proposer_name", "")).strip()
-            source_sender = next((item["sender_name"] for item in recent if item["id"] == source_id), "")
+            source_sender = source_message["sender_name"] if source_message else ""
             if source_sender == "匿名成员":
                 proposer = "匿名成员"
             elif proposer not in known_member_names:
                 proposer = ""
+            if found and source_message and source_message.get("visitor_id"):
+                connection.execute(
+                    "INSERT OR IGNORE INTO idea_votes (idea_id, visitor_id, stance, created_at) VALUES (?, ?, 'supplement', ?)",
+                    (found["id"], source_message["visitor_id"], created_at),
+                )
             if found:
                 idea_id = found["id"]
                 connection.execute(

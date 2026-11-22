@@ -57,6 +57,9 @@ export type SummaryVersion = {
   created_at: string;
 };
 
+export type IdeaStatus = "considering" | "pending" | "adopted" | "rejected";
+export type IdeaStance = "support" | "oppose" | "supplement" | null;
+
 export type Idea = {
   id: number;
   title: string;
@@ -65,10 +68,13 @@ export type Idea = {
   tradeoffs: string;
   proposer_name: string;
   source_message_id: number | null;
-  status: string;
+  status: IdeaStatus;
   dimensions: Record<string, number>;
   rationale: string;
   average_score: number | null;
+  support_count: number;
+  oppose_count: number;
+  my_stance: IdeaStance;
 };
 
 export type RoomUsage = {
@@ -177,6 +183,14 @@ export const api = {
     request<{ latest: SummaryVersion | null; history: SummaryVersion[] }>(`/api/rooms/${sessionId}/summary?visitor_id=${encodeURIComponent(visitorId)}`),
   getIdeas: (sessionId: string, visitorId: string) =>
     request<{ ideas: Idea[] }>(`/api/rooms/${sessionId}/ideas?visitor_id=${encodeURIComponent(visitorId)}`),
+  voteIdea: (sessionId: string, ideaId: number, visitorId: string, stance: Exclude<IdeaStance, "supplement" | null>) =>
+    request<{ ideas: Idea[] }>(`/api/rooms/${sessionId}/ideas/${ideaId}/vote`, {
+      method: "PUT", body: JSON.stringify({ visitor_id: visitorId, stance }),
+    }),
+  updateIdeaStatus: (sessionId: string, identity: Identity, ideaId: number, status: IdeaStatus) =>
+    request<{ ideas: Idea[] }>(`/api/rooms/${sessionId}/ideas/${ideaId}/status`, {
+      method: "PUT", body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, status }),
+    }),
   getTodos: (sessionId: string, visitorId: string) =>
     request<{ todos: Todo[] }>(`/api/rooms/${sessionId}/todos?visitor_id=${encodeURIComponent(visitorId)}`),
   getDocuments: (sessionId: string, visitorId: string) =>

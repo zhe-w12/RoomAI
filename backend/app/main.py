@@ -148,6 +148,17 @@ class MessageRequest(BaseModel):
     anonymous: bool = False
 
 
+class IdeaVoteRequest(BaseModel):
+    visitor_id: str
+    stance: str = Field(pattern="^(support|oppose)$")
+
+
+class IdeaStatusRequest(BaseModel):
+    visitor_id: str
+    owner_token: str = Field(min_length=1)
+    status: str = Field(pattern="^(considering|pending|adopted|rejected)$")
+
+
 class PhaseRequest(BaseModel):
     visitor_id: str
     owner_token: str
@@ -446,14 +457,17 @@ async def publish_red_team(session_id: str, detail: str = "", *, automatic: bool
                 connection.execute("UPDATE rooms SET red_team_count = MAX(0, red_team_count - 1) WHERE session_id = ?", (session_id,))
 
 
-def get_ideas_for_event(session_id: str) -> list[dict]:
+def get_ideas_for_event(session_id: str, visitor_id: str | None = None) -> list[dict]:
     with database() as connection:
         rows = connection.execute(
             """SELECT i.*,
                       (SELECT dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions,
-                      (SELECT rationale FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS rationale
-               FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC""",
-            (session_id,),
+                      (SELECT rationale FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS rationale,
+                      (SELECT COUNT(*) FROM idea_votes iv WHERE iv.idea_id = i.id AND iv.stance = 'support') AS support_count,
+                      (SELECT COUNT(*) FROM idea_votes iv WHERE iv.idea_id = i.id AND iv.stance = 'oppose') AS oppose_count,
+                      (SELECT stance FROM idea_votes iv WHERE iv.idea_id = i.id AND iv.visitor_id = ?) AS my_stance
+               FROM ideas i WHERE i.session_id = ?""",
+            (visitor_id, session_id),
         ).fetchall()
     ideas = []
     for row in rows:
@@ -462,6 +476,15 @@ def get_ideas_for_event(session_id: str) -> list[dict]:
         scores = list(item["dimensions"].values())
         item["average_score"] = round(sum(scores) / len(scores), 1) if scores else None
         ideas.append(item)
+    ideas.sort(
+        key=lambda item: (
+            item["average_score"] is not None,
+            item["average_score"] or 0,
+            item["support_count"],
+            -item["oppose_count"],
+        ),
+        reverse=True,
+    )
     return ideas
 
 
@@ -1015,23 +1038,65 @@ def get_summaries(session_id: str, visitor_id: str) -> dict:
 @app.get("/api/rooms/{session_id}/ideas")
 def get_ideas(session_id: str, visitor_id: str) -> dict:
     ensure_visitor(session_id, visitor_id)
+    return {"ideas": get_ideas_for_event(session_id, visitor_id)}
+
+
+@app.put("/api/rooms/{session_id}/ideas/{idea_id}/vote")
+async def vote_idea(session_id: str, idea_id: int, payload: IdeaVoteRequest) -> dict:
+    ensure_visitor(session_id, payload.visitor_id)
+    room = ensure_room(session_id)
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，想法投票已锁定")
     with database() as connection:
-        rows = connection.execute(
-            """SELECT i.*,
-                      (SELECT dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions,
-                      (SELECT rationale FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS rationale,
-                      (SELECT COUNT(*) FROM idea_votes iv WHERE iv.idea_id = i.id AND iv.stance = 'support') AS support_count
-               FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC""",
-            (session_id,),
-        ).fetchall()
-    items = []
-    for row in rows:
-        item = dict(row)
-        item["dimensions"] = json.loads(item["dimensions"] or "{}")
-        scores = list(item["dimensions"].values())
-        item["average_score"] = round(sum(scores) / len(scores), 1) if scores else None
-        items.append(item)
-    return {"ideas": items}
+        idea = connection.execute(
+            "SELECT id FROM ideas WHERE session_id = ? AND id = ?", (session_id, idea_id)
+        ).fetchone()
+        if not idea:
+            raise HTTPException(status_code=404, detail="找不到这个想法")
+        existing = connection.execute(
+            "SELECT stance FROM idea_votes WHERE idea_id = ? AND visitor_id = ?",
+            (idea_id, payload.visitor_id),
+        ).fetchone()
+        if existing and existing["stance"] == payload.stance:
+            connection.execute(
+                "DELETE FROM idea_votes WHERE idea_id = ? AND visitor_id = ?",
+                (idea_id, payload.visitor_id),
+            )
+        else:
+            connection.execute(
+                """INSERT INTO idea_votes (idea_id, visitor_id, stance, created_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(idea_id, visitor_id) DO UPDATE SET stance = excluded.stance, created_at = excluded.created_at""",
+                (idea_id, payload.visitor_id, payload.stance, now_iso()),
+            )
+        connection.execute(
+            "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (now_iso(), session_id),
+        )
+    await manager.broadcast(session_id, {"type": "idea_update", "ideas": get_ideas_for_event(session_id)})
+    return {"ideas": get_ideas_for_event(session_id, payload.visitor_id)}
+
+
+@app.put("/api/rooms/{session_id}/ideas/{idea_id}/status")
+async def update_idea_status(session_id: str, idea_id: int, payload: IdeaStatusRequest) -> dict:
+    visitor = ensure_visitor(session_id, payload.visitor_id)
+    room = ensure_room(session_id)
+    if not visitor["is_owner"] or token_hash(payload.owner_token) != room["owner_token_hash"]:
+        raise HTTPException(status_code=403, detail="只有房主可以更改想法状态")
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，想法状态已锁定")
+    with database() as connection:
+        cursor = connection.execute(
+            "UPDATE ideas SET status = ?, updated_at = ? WHERE session_id = ? AND id = ?",
+            (payload.status, now_iso(), session_id, idea_id),
+        )
+        if not cursor.rowcount:
+            raise HTTPException(status_code=404, detail="找不到这个想法")
+        connection.execute(
+            "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (now_iso(), session_id),
+        )
+    await manager.broadcast(session_id, {"type": "idea_update", "ideas": get_ideas_for_event(session_id)})
+    return {"ideas": get_ideas_for_event(session_id, payload.visitor_id)}
 
 
 @app.get("/api/rooms/{session_id}/todos")
