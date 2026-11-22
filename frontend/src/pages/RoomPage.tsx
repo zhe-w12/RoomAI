@@ -1,6 +1,6 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Activity, AtSign, ArrowDown, ArrowRight, Check, ChevronDown, CircleHelp, Clipboard, ClipboardCheck, Command, FileImage, ImagePlus, Lightbulb, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Search, Send, Settings2, Sparkles, Users, X } from "lucide-react";
+import { Activity, AtSign, ArrowDown, ArrowRight, Check, ChevronDown, CircleHelp, Clipboard, ClipboardCheck, Command, FileImage, ImagePlus, Lightbulb, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Search, Send, Sparkles, Users, X } from "lucide-react";
 import { api, Identity, loadIdentity, Member, Message, Room, saveIdentity } from "../lib/api";
 
 const commands = ["/总结", "/评估", "/投票", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
@@ -330,7 +330,7 @@ export default function RoomPage() {
           <span className="topbar-separator" />
           {unreadMentionIds.length > 0 && <button className="mention-notice" onClick={() => void openUnreadMention()} title="跳转到未读 @ 提醒"><AtSign size={15} /><span>{unreadMentionIds.length}</span></button>}
           <button className={`icon-button top-action ${searchOpen ? "active" : ""}`} onClick={() => { setSearchOpen((value) => !value); setSearch(""); }} aria-label="搜索消息"><Search size={18} /></button>
-          <button className="icon-button top-action settings-action" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={18} /> : <Settings2 size={18} />}</button>
+          <button className="icon-button top-action settings-action" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={18} /> : <Clipboard size={18} />}</button>
         </div>
       </header>
 
