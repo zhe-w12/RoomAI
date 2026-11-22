@@ -108,6 +108,16 @@ export type ReplayEvent = {
   message_id: number | null;
 };
 
+export type RoomSearchResult = {
+  type: "message" | "idea" | "summary";
+  id: number;
+  title: string;
+  excerpt: string;
+  created_at: string;
+  source_message_id: number | null;
+  score?: number | null;
+};
+
 export type Message = {
   id: number;
   session_id: string;
@@ -211,6 +221,8 @@ export const api = {
     }),
   getReplay: (sessionId: string, visitorId: string) =>
     request<{ topic: string; events: ReplayEvent[] }>(`/api/rooms/${sessionId}/replay?visitor_id=${encodeURIComponent(visitorId)}`),
+  searchRoom: (sessionId: string, visitorId: string, query: string) =>
+    request<{ results: RoomSearchResult[] }>(`/api/rooms/${sessionId}/search?visitor_id=${encodeURIComponent(visitorId)}&q=${encodeURIComponent(query)}`),
   getMentions: (sessionId: string, visitorId: string) =>
     request<{ message_ids: number[] }>(`/api/rooms/${sessionId}/mentions?visitor_id=${encodeURIComponent(visitorId)}`),
   markMentionsRead: (sessionId: string, identity: Identity, message_ids: number[]) =>

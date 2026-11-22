@@ -211,9 +211,22 @@ a { color: inherit; text-decoration: none; }
 .mention-badge { min-width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; gap: 3px; padding: 0 7px; color: var(--ink); border: 1px solid var(--line); border-radius: 999px; background: var(--bg); font-size: 11px; font-weight: 650; cursor: pointer; }
 .mobile-menu, .mobile-side-close { display: none; }
 
-.searchbar { z-index: 2; display: flex; align-items: center; gap: 9px; padding: 8px 20px; border-bottom: 1px solid var(--line-soft); background: var(--bg-subtle); }
+.searchbar { position: relative; z-index: 2; display: flex; align-items: center; gap: 9px; padding: 8px 20px; border-bottom: 1px solid var(--line-soft); background: var(--bg-subtle); }
 .searchbar input { min-width: 0; flex: 1; padding: 4px 0; color: var(--ink); border: 0; outline: 0; background: transparent; font-size: 12.5px; }
 .searchbar > span { color: var(--faint); font-size: 11px; }
+.search-results { position: relative; z-index: 2; max-height: min(42dvh, 340px); overflow: auto; border-bottom: 1px solid var(--line); background: #fff; box-shadow: 0 8px 18px #20202a0d; }
+.search-result { width: 100%; min-height: 55px; display: flex; align-items: center; gap: 11px; padding: 9px 20px; text-align: left; color: var(--ink); border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; cursor: pointer; }
+.search-result:last-child { border-bottom: 0; }
+.search-result:hover, .search-result:focus-visible { background: var(--bg-subtle); outline: none; }
+.search-result-type { width: 38px; flex: 0 0 38px; padding: 4px 0; text-align: center; color: #6658d8; border-radius: 5px; background: #f0edff; font-size: 10px; }
+.search-result-idea { color: #a7660b; background: #fff5e4; }
+.search-result-summary { color: #2f8667; background: #eaf7f0; }
+.search-result-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.search-result-copy b { overflow: hidden; color: var(--ink-2); font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-copy small { overflow: hidden; color: var(--muted); font-size: 10.5px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.search-result time { flex: 0 0 auto; color: var(--faint); font-size: 10px; }
+.search-empty { margin: 0; padding: 17px 20px; color: var(--muted); font-size: 11.5px; text-align: center; }
+.search-empty-error { color: #a43d2d; }
 
 /* 消息流：别人的消息没有气泡，自己的消息浅灰底 */
 .chat { position: relative; min-height: 0; flex: 1; display: flex; flex-direction: column; }
@@ -441,6 +454,8 @@ a { color: inherit; text-decoration: none; }
   .online span { display: none; }
   .top-sep { display: none; }
   .searchbar { padding: 8px 12px; }
+  .search-result { gap: 8px; padding: 9px 12px; }
+  .search-result time { display: none; }
   .prep { margin: 8px 10px 0; }
   .msg-list { padding: 16px 10px 8px; }
   .msg { gap: 8px; margin-bottom: 14px; }

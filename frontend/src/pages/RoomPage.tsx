@@ -1,7 +1,7 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Send, Settings2, Sparkles, Trash2, Undo2, X } from "lucide-react";
-import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room, RoomDocument, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
+import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
 
@@ -66,6 +66,9 @@ export default function RoomPage() {
   const [newMessages, setNewMessages] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<RoomSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [roomDeleteOpen, setRoomDeleteOpen] = useState(false);
   const [roomDeleting, setRoomDeleting] = useState(false);
@@ -218,6 +221,26 @@ export default function RoomPage() {
     void load();
     return () => { canceled = true; };
   }, [sessionId]);
+
+  useEffect(() => {
+    const query = search.trim();
+    if (!searchOpen || !identity || !query) {
+      setSearchResults([]);
+      setSearchError("");
+      setSearchLoading(false);
+      return;
+    }
+    let canceled = false;
+    const timer = window.setTimeout(() => {
+      setSearchLoading(true);
+      setSearchError("");
+      void api.searchRoom(sessionId, identity.visitor_id, query)
+        .then((result) => { if (!canceled) setSearchResults(result.results); })
+        .catch((reason) => { if (!canceled) setSearchError(reason instanceof Error ? reason.message : "搜索失败，请稍后重试。"); })
+        .finally(() => { if (!canceled) setSearchLoading(false); });
+    }, 220);
+    return () => { canceled = true; window.clearTimeout(timer); };
+  }, [identity?.visitor_id, search, searchOpen, sessionId]);
 
   useEffect(() => { nearBottomRef.current = nearBottom; }, [nearBottom]);
 
@@ -738,6 +761,16 @@ export default function RoomPage() {
     setNearBottom(false);
   }
 
+  function selectSearchResult(result: RoomSearchResult) {
+    setSearchOpen(false);
+    setSearch("");
+    if (result.source_message_id) {
+      window.setTimeout(() => jumpToMessage(result.source_message_id!), 80);
+    } else {
+      showToast("这条结果没有对应的原始消息位置。");
+    }
+  }
+
   async function openUnreadMention() {
     if (!identity || unreadMentionIds.length === 0) return;
     const ids = unreadMentionIds;
@@ -946,7 +979,16 @@ export default function RoomPage() {
         <button className="icon-btn" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={17} /> : <Clipboard size={17} />}</button>
       </header>
 
-      {searchOpen && <div className="searchbar"><Search size={16} /><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索消息或发言人…" /><span>{search ? `${filteredMessages.length} 条` : "输入关键词筛选"}</span><button className="icon-btn" onClick={() => { setSearchOpen(false); setSearch(""); }} aria-label="关闭搜索"><X size={15} /></button></div>}
+      {searchOpen && <>
+        <div className="searchbar"><Search size={16} /><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索消息、想法或总结…" /><span>{searchLoading ? "搜索中…" : searchError || (search.trim() ? `${searchResults.length} 条结果` : "输入关键词搜索")}</span><button className="icon-btn" onClick={() => { setSearchOpen(false); setSearch(""); }} aria-label="关闭搜索"><X size={15} /></button></div>
+        {search.trim() && <div className="search-results" aria-label="房间搜索结果">
+          {searchLoading && !searchResults.length ? <p className="search-empty">正在搜索消息、想法和总结…</p> : searchError ? <p className="search-empty search-empty-error">{searchError}</p> : searchResults.length ? searchResults.map((result) => <button className="search-result" key={`${result.type}-${result.id}`} onClick={() => selectSearchResult(result)}>
+            <span className={`search-result-type search-result-${result.type}`}>{result.type === "message" ? "消息" : result.type === "idea" ? "想法" : "总结"}</span>
+            <span className="search-result-copy"><b>{result.title}{result.type === "idea" && result.score != null ? ` · ${result.score.toFixed(1)}/5` : ""}</b><small>{result.excerpt || "没有可显示的摘要"}</small></span>
+            <time>{formatTime(result.created_at)}</time>
+          </button>) : !searchLoading && <p className="search-empty">没有找到匹配内容。</p>}
+        </div>}
+      </>}
 
       <section className="chat">
         {room.closed_at && <a className="room-closed-banner" href={`/room/${sessionId}/memo`}><Check size={15} />讨论已结束，立项纪要已生成<span>查看纪要 <ArrowRight size={13} /></span></a>}

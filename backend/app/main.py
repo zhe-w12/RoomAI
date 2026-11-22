@@ -1121,9 +1121,10 @@ async def close_vote(session_id: str, vote_id: int, payload: VoteCloseRequest) -
 @app.get("/api/rooms/{session_id}/search")
 def search_room(session_id: str, visitor_id: str, q: str = Query(min_length=1, max_length=100)) -> dict:
     ensure_visitor(session_id, visitor_id)
-    query = f"%{q.strip()}%"
-    if not q.strip():
+    needle = q.strip()
+    if not needle:
         return {"results": []}
+    query = f"%{needle}%"
     with database() as connection:
         messages = connection.execute(
             """SELECT id, sender_name AS title, content AS excerpt, created_at, id AS source_message_id
@@ -1132,21 +1133,42 @@ def search_room(session_id: str, visitor_id: str, q: str = Query(min_length=1, m
             (session_id, query, query),
         ).fetchall()
         ideas = connection.execute(
-            """SELECT id, title, description AS excerpt, updated_at AS created_at, source_message_id
-               FROM ideas WHERE session_id = ? AND (title LIKE ? OR description LIKE ?) ORDER BY updated_at DESC LIMIT 20""",
+            """SELECT i.id, i.title, i.description AS excerpt, i.updated_at AS created_at, i.source_message_id,
+                      (SELECT dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions
+               FROM ideas i WHERE i.session_id = ? AND (i.title LIKE ? OR i.description LIKE ?) ORDER BY i.updated_at DESC LIMIT 20""",
             (session_id, query, query),
         ).fetchall()
         summaries = connection.execute(
-            "SELECT version AS id, content, created_at FROM summaries WHERE session_id = ? AND content LIKE ? ORDER BY version DESC LIMIT 20",
+            "SELECT version AS id, content, through_message_id AS source_message_id, created_at FROM summaries WHERE session_id = ? AND content LIKE ? ORDER BY version DESC LIMIT 20",
             (session_id, query),
         ).fetchall()
     results = [{"type": "message", **dict(row)} for row in messages]
-    results.extend({"type": "idea", **dict(row)} for row in ideas)
+    for row in ideas:
+        item = dict(row)
+        dimensions = json.loads(item.pop("dimensions") or "{}")
+        item["score"] = round(sum(dimensions.values()) / len(dimensions), 1) if dimensions else None
+        results.append({"type": "idea", **item})
     for row in summaries:
         data = json.loads(row["content"])
-        results.append({"type": "summary", "id": row["id"], "title": f"讨论总结 v{row['id']}", "excerpt": "；".join(data.get("consensus", [])), "created_at": row["created_at"], "source_message_id": None})
-    results.sort(key=lambda item: item["created_at"], reverse=True)
-    return {"results": results[:50]}
+        searchable: list[str] = []
+
+        def collect_strings(value: object) -> None:
+            if isinstance(value, str):
+                searchable.append(value)
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    collect_strings(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    collect_strings(nested)
+
+        collect_strings(data)
+        text = "；".join(searchable)
+        position = text.casefold().find(needle.casefold())
+        excerpt = text[max(0, position - 80) : max(0, position - 80) + 240] if position >= 0 else text[:240]
+        results.append({"type": "summary", "id": row["id"], "title": f"讨论总结 v{row['id']}", "excerpt": excerpt, "created_at": row["created_at"], "source_message_id": row["source_message_id"]})
+    results.sort(key=lambda item: item["created_at"])
+    return {"results": results[-50:]}
 
 
 @app.get("/api/rooms/{session_id}/replay")
