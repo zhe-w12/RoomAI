@@ -1,6 +1,6 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Activity, AtSign, ArrowDown, ArrowRight, Check, ChevronDown, CircleHelp, Clipboard, ClipboardCheck, Command, FileImage, ImagePlus, Lightbulb, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Search, Send, Sparkles, Users, X } from "lucide-react";
+import { Activity, AtSign, ArrowDown, ArrowRight, Check, ChevronDown, CircleHelp, Clipboard, ClipboardCheck, Command, Copy, FileImage, ImagePlus, Lightbulb, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Reply, Search, Send, Sparkles, Undo2, Users, X } from "lucide-react";
 import { api, Identity, loadIdentity, Member, Message, Room, saveIdentity } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 
@@ -41,9 +41,16 @@ export default function RoomPage() {
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState("");
   const [quoteFlash, setQuoteFlash] = useState<number | null>(null);
+  const [menu, setMenu] = useState<{ message: Message; x: number; y: number } | null>(null);
+  const [confirmRecall, setConfirmRecall] = useState(false);
+  const [pressingId, setPressingId] = useState<number | null>(null);
+  const [toast, setToast] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
   const nearBottomRef = useRef(true);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressStart = useRef<{ x: number; y: number } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -135,6 +142,13 @@ export default function RoomPage() {
     return () => URL.revokeObjectURL(url);
   }, [selectedImage]);
 
+  useEffect(() => {
+    if (!menu) return;
+    function onKey(event: globalThis.KeyboardEvent) { if (event.key === "Escape") closeMenu(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu]);
+
   async function joinByLink(event: FormEvent) {
     event.preventDefault();
     setJoining(true);
@@ -201,8 +215,75 @@ export default function RoomPage() {
     if (event.key === "Escape") { setReplyTo(null); setComposerValue(""); }
   }
 
+  function showToast(text: string) {
+    setToast(text);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 1800);
+  }
+
+  function openMenu(message: Message, clientX: number, clientY: number) {
+    // 桌面端浮窗：贴着按压点打开，别超出视口；手机上 CSS 会把它变成底部卡片。
+    const width = 216;
+    const height = 190;
+    const x = Math.min(Math.max(8, clientX), window.innerWidth - width - 8);
+    const y = clientY + height > window.innerHeight ? Math.max(8, clientY - height) : clientY;
+    setConfirmRecall(false);
+    setMenu({ message, x, y });
+  }
+
+  function closeMenu() {
+    setMenu(null);
+    setConfirmRecall(false);
+  }
+
+  function startPress(message: Message, event: React.PointerEvent) {
+    if (message.is_recalled) return;
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    pressStart.current = { x: event.clientX, y: event.clientY };
+    setPressingId(message.id);
+    pressTimer.current = setTimeout(() => {
+      if (navigator.vibrate) navigator.vibrate(10);
+      setPressingId(null);
+      openMenu(message, event.clientX, event.clientY);
+    }, 500);
+  }
+
+  function cancelPress() {
+    if (pressTimer.current) clearTimeout(pressTimer.current);
+    pressTimer.current = null;
+    pressStart.current = null;
+    setPressingId(null);
+  }
+
+  function handlePressMove(event: React.PointerEvent) {
+    // 手指滑动超过 10px 说明是在滚动列表，不是长按。
+    if (!pressStart.current) return;
+    if (Math.abs(event.clientX - pressStart.current.x) > 10 || Math.abs(event.clientY - pressStart.current.y) > 10) cancelPress();
+  }
+
+  function canRecall(message: Message) {
+    return !!identity && message.visitor_id === identity.visitor_id && Date.now() - new Date(message.created_at).getTime() <= 120000;
+  }
+
+  function replyFromMenu(message: Message) {
+    setReplyTo(message);
+    composerRef.current?.focus();
+    closeMenu();
+  }
+
+  async function copyMessage(message: Message) {
+    try {
+      await navigator.clipboard.writeText(message.content || "图片");
+      showToast("已复制");
+    } catch {
+      setError("复制失败，请手动长按复制");
+    }
+    closeMenu();
+  }
+
   async function recall(message: Message) {
-    if (!identity || !window.confirm("撤回这条消息？")) return;
+    if (!identity) return;
+    closeMenu();
     try { applyMessage(await api.recallMessage(sessionId, message.id, identity.visitor_id)); }
     catch (err) { setError(err instanceof Error ? err.message : "撤回失败"); }
   }
@@ -247,6 +328,7 @@ export default function RoomPage() {
 
   function onScroll() {
     if (!listRef.current) return;
+    if (menu) closeMenu();
     const remaining = listRef.current.scrollHeight - listRef.current.scrollTop - listRef.current.clientHeight;
     const atBottom = remaining < 120;
     setNearBottom(atBottom);
@@ -351,11 +433,11 @@ export default function RoomPage() {
             const previous = filteredMessages[index - 1];
             const showAuthor = !previous || previous.sender_name !== message.sender_name || new Date(message.created_at).getTime() - new Date(previous.created_at).getTime() > 5 * 60 * 1000;
             const mentioned = !own && message.content.includes(`@${identity.nickname}`);
-            return <article id={`message-${message.id}`} key={message.id} className={`message-row ${own ? "message-own" : ""} ${message.sender_type === "agent" ? "message-agent-row" : ""} ${mentioned ? "mention-alert" : ""} ${quoteFlash === message.id ? "message-flash" : ""}`}>
+            return <article id={`message-${message.id}`} key={message.id} className={`message-row ${own ? "message-own" : ""} ${message.sender_type === "agent" ? "message-agent-row" : ""} ${mentioned ? "mention-alert" : ""} ${quoteFlash === message.id ? "message-flash" : ""} ${menu?.message.id === message.id ? "menu-open" : ""}`}>
               {!own && <div className={`avatar message-avatar ${message.sender_type === "agent" ? "avatar-ai" : avatarColor(message.sender_name)}`}>{message.sender_type === "agent" ? <Sparkles size={15} /> : message.sender_name.slice(0, 1)}</div>}
               <div className="message-stack">
                 {showAuthor && <div className={`message-meta ${own ? "meta-own" : ""}`}><span className={message.sender_type === "agent" ? "agent-name" : ""}>{message.sender_type === "agent" && <Sparkles size={12} />}{message.sender_name}{message.sender_type === "agent" && <i className="ai-label">AI 助手</i>}</span><time>{formatTime(message.created_at)}</time></div>}
-                <div className={`message-bubble ${own ? "bubble-own" : ""} ${message.sender_type === "agent" ? "bubble-agent" : ""} ${message.is_recalled ? "bubble-recalled" : ""}`}>
+                <div className={`message-bubble ${own ? "bubble-own" : ""} ${message.sender_type === "agent" ? "bubble-agent" : ""} ${message.is_recalled ? "bubble-recalled" : ""} ${pressingId === message.id ? "bubble-pressing" : ""}`} onPointerDown={(event) => startPress(message, event)} onPointerUp={cancelPress} onPointerLeave={cancelPress} onPointerMove={handlePressMove} onContextMenu={(event) => { event.preventDefault(); if (!message.is_recalled) openMenu(message, event.clientX, event.clientY); }}>
                   {message.reply_to && <button className="quoted-message" onClick={() => jumpToMessage(message.reply_to!.id)}><span className="quote-bar" /><span><b>{message.reply_to.sender_name}</b><small>{message.reply_to.content}</small></span></button>}
                   {message.is_recalled ? <span className="recalled-copy">这条消息已撤回</span> : <>
                     {message.content && (message.sender_type === "agent"
@@ -363,7 +445,6 @@ export default function RoomPage() {
                       : <p className="message-content">{message.content.split(/(@[\w\u4e00-\u9fff-]+)/g).map((part, partIndex) => part.startsWith("@") ? <mark className="mention-mark" key={partIndex}>{part}</mark> : part)}</p>)}
                     {message.image_url && <button className="message-image" onClick={() => window.open(api.imageUrl(message.image_url!), "_blank", "noopener,noreferrer")}><img src={api.imageUrl(message.image_url)} alt="讨论附件" /><span><FileImage size={14} /> 查看图片</span></button>}
                   </>}
-                  {!message.is_recalled && <div className="message-tools"><button onClick={() => { setReplyTo(message); composerRef.current?.focus(); }} title="引用回复"><MessageCircle size={13} /> 回复</button>{own && Date.now() - new Date(message.created_at).getTime() <= 120000 && <button onClick={() => void recall(message)} title="两分钟内可以撤回">撤回</button>}</div>}
                 </div>
               </div>
               {own && <div className={`avatar message-avatar ${avatarColor(identity.nickname)}`}>{identity.nickname.slice(0, 1)}</div>}
@@ -375,6 +456,25 @@ export default function RoomPage() {
 
         {!nearBottom && newMessages && <button className="new-messages-button" onClick={() => setNearBottom(true)}>有新消息 <ArrowDown size={15} /></button>}
         {error && <div className="message-error"><span>{error}</span><button onClick={() => setError("")} aria-label="关闭"><X size={14} /></button></div>}
+        {toast && <div className="toast"><Check size={13} /><span>{toast}</span></div>}
+        {menu && <>
+          <div className="message-menu-backdrop" onClick={closeMenu} onContextMenu={(event) => event.preventDefault()} />
+          <div className="message-menu" style={{ left: menu.x, top: menu.y }} role="menu">
+            {confirmRecall ? <>
+              <div className="menu-confirm-title">撤回这条消息？</div>
+              <div className="menu-confirm-sub">撤回后，所有人都会看到“这条消息已撤回”。</div>
+              <button className="menu-item-danger" onClick={() => void recall(menu.message)}><Undo2 size={15} /> 确定撤回</button>
+              <button onClick={() => setConfirmRecall(false)}><X size={15} /> 取消</button>
+            </> : <>
+              <button onClick={() => replyFromMenu(menu.message)}><Reply size={15} /> 引用回复</button>
+              {menu.message.content && <button onClick={() => void copyMessage(menu.message)}><Copy size={15} /> 复制</button>}
+              {canRecall(menu.message) && <>
+                <div className="menu-divider" />
+                <button className="menu-item-danger" onClick={() => setConfirmRecall(true)}><Undo2 size={15} /> 撤回</button>
+              </>}
+            </>}
+          </div>
+        </>}
 
         <div className="composer-wrap">
           {replyTo && <div className="reply-context"><span className="quote-bar" /><span><b>回复 {replyTo.sender_name}</b><small>{replyTo.content || "图片"}</small></span><button className="icon-button" onClick={() => setReplyTo(null)} aria-label="取消引用"><X size={15} /></button></div>}
