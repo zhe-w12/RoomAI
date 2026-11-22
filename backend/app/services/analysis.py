@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import re
 from datetime import datetime, timezone
 
@@ -129,6 +130,9 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "decision_points 只记录讨论中已经明确暴露、需要团队做出选择或确认的关键决策；不要把一般待办、风险或信息缺口当成决策。"
         "只在收敛阶段输出 decision_points，最多 5 条；发散阶段必须返回空数组。"
         "如果讨论明显跑题、停滞或关键立项信息缺失，在 guide_question 中给出一个简短、开放的追问；否则留空。"
+        "仅依据最近消息判断群体讨论状态，不推断或诊断任何个人情绪；state 必须从 active、steady、quiet、tense 中选一个；"
+        "tense 只用于明确的冲突或对立表达，quiet 只用于可观察的低参与，证据不足时用 steady。"
+        "atmosphere.evidence 只描述消息中可观察到的互动信号，不写成员姓名；adjustment 说明 RoomAI 下一轮如何调整节奏或提问方式。"
         "当房间处于发散阶段，且已有多个清晰候选方向、讨论开始进入比较取舍时，phase_suggestion 可设为 converge；否则为 null。"
         "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称；"
         "如果来源消息的 sender 是‘匿名成员’，proposer_name 必须填写‘匿名成员’，绝不能猜测身份；"
@@ -136,6 +140,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "待办应尽量关联 known_todos 中的 todo_id；只有消息里明确提到时才给负责人和截止日期，状态可为 open、done 或 dropped。"
         "只返回 JSON，格式为："
         '{"summary":{"consensus":["..."],"disagreements":["..."],"decision_points":["..."],"todos":[{"todo_id":1,"title":"...","assignee":"","status":"open","due_at":"YYYY-MM-DD","source_message_id":1}],'
+        '"atmosphere":{"state":"active|steady|quiet|tense","confidence":0.0,"evidence":"...","adjustment":"..."},'
         '"dimension_coverage":{"user":false,"technology":false,"time":false,"cost":false,"risk":false},"guide_question":"","phase_suggestion":null},'
         '"ideas":[{"title":"...","description":"...","proposer_name":"","source_message_id":1,"merge_into":null,'
         f'"dimensions":{dimension_schema},"rationale":"...","strengths":"...","tradeoffs":"..."}}]}}。'
@@ -199,6 +204,15 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
                 "source_message_id": source_id,
             })
     raw_coverage = summary_data.get("dimension_coverage") if isinstance(summary_data.get("dimension_coverage"), dict) else {}
+    raw_atmosphere = summary_data.get("atmosphere") if isinstance(summary_data.get("atmosphere"), dict) else {}
+    raw_atmosphere_state = raw_atmosphere.get("state")
+    atmosphere_state = raw_atmosphere_state if isinstance(raw_atmosphere_state, str) and raw_atmosphere_state in {"active", "steady", "quiet", "tense"} else "steady"
+    try:
+        atmosphere_confidence = min(1.0, max(0.0, float(raw_atmosphere.get("confidence", 0))))
+    except (TypeError, ValueError):
+        atmosphere_confidence = 0.0
+    if not math.isfinite(atmosphere_confidence):
+        atmosphere_confidence = 0.0
     guide_question = str(summary_data.get("guide_question", "")).strip()[:500]
     decision_points = _clean_list(summary_data.get("decision_points"), 5) if room["phase"] == "converge" else []
     phase_suggestion = summary_data.get("phase_suggestion")
@@ -215,6 +229,12 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "guide_question": guide_question,
         "decision_points": decision_points,
         "phase_suggestion": phase_suggestion,
+        "atmosphere": {
+            "state": atmosphere_state,
+            "confidence": atmosphere_confidence,
+            "evidence": str(raw_atmosphere.get("evidence", "")).strip()[:400],
+            "adjustment": str(raw_atmosphere.get("adjustment", "")).strip()[:300],
+        },
     }
     created_at = _now()
     saved_ideas: list[dict] = []

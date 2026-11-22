@@ -181,6 +181,15 @@ a { color: inherit; text-decoration: none; }
 .dim-dot { width: 6px; height: 6px; border: 1px solid #d5d5d5; border-radius: 50%; }
 .dim-done .dim-dot { border-color: #111; background: #111; }
 .dim-done > span:last-child { color: var(--ink-2); }
+.atmosphere-card { display: grid; gap: 6px; margin: 11px 0; padding: 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--bg-subtle); }
+.atmosphere-card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px; }
+.atmosphere-card-head b { font-size: 11px; font-weight: 650; }
+.atmosphere-card-head span { color: var(--muted); font-size: 9.5px; }
+.atmosphere-card p { margin: 0; color: var(--ink-2); font-size: 10.5px; line-height: 1.5; }
+.atmosphere-card small { color: var(--muted); font-size: 9.5px; line-height: 1.45; }
+.atmosphere-card .atmosphere-footnote { color: var(--faint); }
+.atmosphere-quiet { border-color: #eee0b4; background: #fffaf0; }
+.atmosphere-tense { border-color: #f0d0cc; background: #fff8f7; }
 .phase-suggestion { display: grid; gap: 6px; margin: 10px 0 4px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-subtle); }
 .phase-suggestion span { color: var(--ink-2); font-size: 10.5px; }
 .phase-suggestion button { justify-self: start; padding: 0; color: var(--ink); border: 0; background: transparent; font-size: 10.5px; font-weight: 650; cursor: pointer; }

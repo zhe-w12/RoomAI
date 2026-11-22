@@ -23,6 +23,70 @@ def _average(dimensions: dict) -> float | None:
     return round(sum(values) / len(values), 1) if values else None
 
 
+def _render_project_proposal(
+    topic: str,
+    data: dict,
+    chosen: dict | None,
+    risks: list[dict],
+    timeline: list[dict],
+    todos: list[dict],
+    missing_dimensions: list[dict],
+) -> str:
+    text = lambda key, limit=1400: str(data.get(key, "")).strip()[:limit]
+    bullets = lambda key, limit=8: _items(data.get(key), limit)
+    lines = [f"# 立项书：{_cell(topic)}", "", "> 根据本次讨论记录草拟；建议指标与待确认项需由团队最终确认。", ""]
+    sections = [
+        ("1. 项目背景", text("background")),
+        ("2. 要解决的问题", text("problem")),
+    ]
+    for heading, content in sections:
+        lines.extend([f"## {heading}", "", _cell(content) if content else "讨论记录中尚未形成明确结论，待团队补充。", ""])
+    for heading, key in (("3. 项目目标", "goals"), ("4. 目标用户", "target_users"), ("5. 项目范围", "scope")):
+        values = bullets(key)
+        lines.extend([f"## {heading}", ""])
+        lines.extend(f"- {_cell(value)}" for value in values)
+        if not values:
+            lines.append("- 待团队确认")
+        lines.append("")
+    lines.extend(["## 6. 方案概述", "", _cell(text("solution")) if text("solution") else "待团队根据讨论结果补充。", ""])
+    lines.extend(["## 7. 推荐方向", ""])
+    if chosen:
+        lines.append(f"建议优先验证「{_cell(chosen.get('title'))}」。{_cell(text('recommendation_reason', 1000)) or '讨论记录尚不足以确认最终方案。'}")
+    else:
+        lines.append("讨论尚未确认推荐方案；请结合候选想法和验证结果决定。")
+    lines.extend(["", "## 8. 实施计划", "", "| 里程碑 | 时间 | 讨论依据 |", "|---|---|---|"])
+    if timeline:
+        lines.extend(f"| {_cell(item['milestone'])} | {_cell(item['target'])} | {_cell(item['basis'])} |" for item in timeline)
+    else:
+        lines.append("| 待团队确定 | 待定 | 讨论记录中没有可核实的时间安排 |")
+    lines.extend(["", "## 9. 资源与分工", ""])
+    resources = bullets("resources")
+    if resources:
+        lines.extend(f"- {_cell(item)}" for item in resources)
+    else:
+        lines.append("- 人力与预算：待团队确认")
+    if todos:
+        lines.extend(["", "已记录的下一步："])
+        lines.extend(f"- {_cell(item['title'])}（负责人：{_cell(item['assignee']) or '待分配'}；期限：{_cell(item['due_at']) or '待定'}）" for item in todos[:12])
+    lines.extend(["", "## 10. 风险与应对", ""])
+    if risks:
+        lines.extend(f"- **{_cell(item.get('risk'))}**；依据：{_cell(item.get('evidence')) or '讨论记录未提供'}；应对：{_cell(item.get('mitigation')) or '待团队补充'}" for item in risks)
+    else:
+        lines.append("讨论记录中尚无结构化风险项，建议在实施前补充风险评估。")
+    metrics = bullets("success_metrics")
+    lines.extend(["", "## 11. 建议验证指标", ""])
+    lines.extend(f"- {_cell(item)}（建议项，待团队确认）" for item in metrics)
+    if not metrics:
+        lines.append("讨论记录中尚未明确量化指标，待团队确认。")
+    questions = bullets("open_questions", 10)
+    questions.extend(_cell(item.get("question")) for item in missing_dimensions if item.get("question"))
+    lines.extend(["", "## 12. 待确认事项", ""])
+    lines.extend(f"- {_cell(item)}" for item in dict.fromkeys(questions))
+    if not questions:
+        lines.append("暂无额外待确认事项。")
+    return "\n".join(lines)
+
+
 async def generate_room_report(session_id: str, model: str, missing_dimensions: list[dict]) -> dict:
     with database() as connection:
         room = connection.execute("SELECT topic FROM rooms WHERE session_id = ?", (session_id,)).fetchone()
@@ -95,9 +159,13 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
                 "从 ideas 里选择推荐方案时只能返回已有 idea id；证据不足就返回 null 并说明待验证。"
                 "风险需包含已讨论证据与建议应对，未验证假设和下次讨论建议应具体。只返回 JSON："
                 '{"recommended_idea_id":null,"recommendation_reason":"...","risks":[{"risk":"...","evidence":"...","mitigation":"..."}],'
-                '"assumptions":["..."],"next_discussion":["..."],"timeline":[{"milestone":"...","target":"...","basis":"..."}],"retrospective":"...","mermaid":""}'
+                '"assumptions":["..."],"next_discussion":["..."],"timeline":[{"milestone":"...","target":"...","basis":"..."}],'
+                '"proposal":{"background":"...","problem":"...","goals":["..."],"target_users":["..."],"scope":["..."],'
+                '"solution":"...","resources":["..."],"success_metrics":["..."],"open_questions":["..."]},"retrospective":"...","mermaid":""}'
                 "timeline 只可整理消息或明确待办中有证据的里程碑；basis 必须摘自输入原文。没有证据就返回空数组。"
                 "target 只有在原文明确给出日期/周期时才填写原文，否则写‘待定’，不得推算或编造时间。"
+                "proposal 是面向团队评审的立项书草稿：背景、问题、目标用户和已确认方案必须来自输入事实；"
+                "success_metrics 只能写成待确认的建议指标，不得冒充团队已达成的承诺；资源或范围缺少证据时返回空值。"
             ),
         },
         {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
@@ -118,6 +186,8 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
     recommendation = str(generated.get("recommendation_reason", "")).strip()[:1600]
     risks = generated.get("risks") if isinstance(generated.get("risks"), list) else []
     risks = [item for item in risks[:8] if isinstance(item, dict) and str(item.get("risk", "")).strip()]
+    proposal_data = generated.get("proposal") if isinstance(generated.get("proposal"), dict) else {}
+    proposal_data["recommendation_reason"] = recommendation
     assumptions = _items(generated.get("assumptions"), 12)
     next_discussion = _items(generated.get("next_discussion"), 8)
     timeline = []
@@ -154,6 +224,9 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
     else:
         minutes.append("| 暂无已记录想法 | — | — | — | — | — |")
     chosen = next((item for item in ideas if item["id"] == recommended_id), None)
+    proposal_markdown = _render_project_proposal(
+        room["topic"], proposal_data, chosen, risks, timeline, todos, missing_dimensions
+    )
     minutes.extend(["", "## 3. 推荐方案及原因", ""])
     if chosen:
         minutes.append(f"推荐：**{_cell(chosen['title'])}**。{recommendation or '目前资料不足以给出更具体的推荐依据。'}")
@@ -202,7 +275,11 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
     retro.extend(f"- {item}" for item in next_discussion or ["围绕未覆盖维度和推荐方案中的关键假设继续收集证据。"])
     if retrospective:
         retro.extend(["", "## 复盘说明", retrospective])
-    return {"minutes_markdown": minutes_markdown, "retrospective_markdown": "\n".join(retro)}
+    return {
+        "minutes_markdown": minutes_markdown,
+        "proposal_markdown": proposal_markdown,
+        "retrospective_markdown": "\n".join(retro),
+    }
 
 
 def markdown_to_docx(markdown: str) -> bytes:

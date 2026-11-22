@@ -41,6 +41,8 @@ export default function ReportPage() {
         <p className="eyebrow">ROOMAI · 讨论成果</p>
         <MarkdownContent content={report.minutes_markdown} />
         <hr className="report-divider" />
+        <MarkdownContent content={report.proposal_markdown} />
+        <hr className="report-divider" />
         <MarkdownContent content={report.retrospective_markdown} />
         <p className="report-date">生成时间：{new Intl.DateTimeFormat("zh-CN", { dateStyle: "long", timeStyle: "short" }).format(new Date(report.created_at))}</p>
       </> : null}

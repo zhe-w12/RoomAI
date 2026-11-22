@@ -28,6 +28,7 @@ export type Room = {
 
 export type RoomReport = {
   minutes_markdown: string;
+  proposal_markdown: string;
   retrospective_markdown: string;
   missing_dimensions: { key: string; label: string; question: string }[];
   created_at: string;
@@ -46,6 +47,7 @@ export type SummaryContent = {
   guide_question?: string;
   decision_points?: string[];
   phase_suggestion?: "converge" | null;
+  atmosphere?: { state: "active" | "steady" | "quiet" | "tense"; confidence: number; evidence: string; adjustment: string };
 };
 
 export type SummaryVersion = {

@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS room_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL UNIQUE REFERENCES rooms(session_id) ON DELETE CASCADE,
     minutes_markdown TEXT NOT NULL,
+    proposal_markdown TEXT NOT NULL DEFAULT '',
     retrospective_markdown TEXT NOT NULL,
     missing_dimensions TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
@@ -230,3 +231,6 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE ideas ADD COLUMN strengths TEXT NOT NULL DEFAULT ''")
         if "tradeoffs" not in idea_columns:
             connection.execute("ALTER TABLE ideas ADD COLUMN tradeoffs TEXT NOT NULL DEFAULT ''")
+        report_columns = {row[1] for row in connection.execute("PRAGMA table_info(room_reports)")}
+        if "proposal_markdown" not in report_columns:
+            connection.execute("ALTER TABLE room_reports ADD COLUMN proposal_markdown TEXT NOT NULL DEFAULT ''")

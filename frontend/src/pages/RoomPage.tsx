@@ -7,6 +7,7 @@ import VoteCard, { Vote } from "../components/VoteCard";
 
 const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/用户视角", "/待办", "/结束", "/帮助"];
 const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
+const atmosphereLabels = { active: "讨论活跃", steady: "节奏平稳", quiet: "讨论偏冷", tense: "存在明显分歧" } as const;
 const emptyUsage: RoomUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_estimate: 0, cost_configured: false };
 
 type SpeechAlternative = { transcript: string };
@@ -987,6 +988,12 @@ export default function RoomPage() {
         const covered = Boolean(summary?.content.dimension_coverage[key]);
         return <div className={`dim-row ${covered ? "dim-done" : ""}`} key={key}><span className="dim-dot" />{label}<span>{covered ? "已讨论" : "待聊"}</span></div>;
       })}</div>
+      {summary?.content.atmosphere && <div className={`atmosphere-card atmosphere-${summary.content.atmosphere.state}`}>
+        <div className="atmosphere-card-head"><b>讨论氛围</b><span>{atmosphereLabels[summary.content.atmosphere.state]} · {Math.round(summary.content.atmosphere.confidence * 100)}%</span></div>
+        <p>{summary.content.atmosphere.evidence || "目前没有足够明显的互动信号。"}</p>
+        {summary.content.atmosphere.adjustment && <small>RoomAI 会：{summary.content.atmosphere.adjustment}</small>}
+        <small className="atmosphere-footnote">依据群体发言形态估计，不判断个人情绪</small>
+      </div>}
       {summary?.content.phase_suggestion === "converge" && room.phase === "diverge" && <div className="phase-suggestion"><span>RoomAI 建议开始收敛</span><button disabled={!identity.owner_token} onClick={() => void togglePhase()}>{identity.owner_token ? "切换阶段" : "等待房主确认"}</button></div>}
 
       <a className="sidebar-replay-link" href={`/room/${sessionId}/replay`}><Clock3 size={15} /><span>讨论回放</span><ArrowRight size={13} /></a>

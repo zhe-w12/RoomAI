@@ -178,7 +178,11 @@ async def answer_room_prompt(
     else:
         system += "\n当前处于收敛阶段：聚焦待决定事项、依据、风险和明确的下一步；发现关键风险时可以提出克制的红队问题。"
     if summary:
-        system += f"\n滚动总结：{summary}"
+        system += (
+            "\n如果滚动总结包含 atmosphere，它只是基于群体发言的低置信度互动信号；"
+            "可以据此放慢节奏、澄清分歧或提出更开放的问题，不推断或评价任何个人的心理状态。"
+            f"\n滚动总结：{summary}"
+        )
     if structured_context:
         system += f"\n结构化记录：{structured_context}"
     if member_names:

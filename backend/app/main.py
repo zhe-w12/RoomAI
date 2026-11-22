@@ -1884,11 +1884,12 @@ async def finish_room(session_id: str, payload: FinishRoomRequest) -> dict:
     created_at = now_iso()
     with database() as connection:
         connection.execute(
-            """INSERT INTO room_reports (session_id, minutes_markdown, retrospective_markdown, missing_dimensions, created_at)
-               VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET
-               minutes_markdown = excluded.minutes_markdown, retrospective_markdown = excluded.retrospective_markdown,
+            """INSERT INTO room_reports (session_id, minutes_markdown, proposal_markdown, retrospective_markdown, missing_dimensions, created_at)
+               VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET
+               minutes_markdown = excluded.minutes_markdown, proposal_markdown = excluded.proposal_markdown,
+               retrospective_markdown = excluded.retrospective_markdown,
                missing_dimensions = excluded.missing_dimensions, created_at = excluded.created_at""",
-            (session_id, report["minutes_markdown"], report["retrospective_markdown"], json.dumps(missing, ensure_ascii=False), created_at),
+            (session_id, report["minutes_markdown"], report["proposal_markdown"], report["retrospective_markdown"], json.dumps(missing, ensure_ascii=False), created_at),
         )
         connection.execute(
             "UPDATE rooms SET closed_at = ?, last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
@@ -1903,7 +1904,7 @@ def get_room_report(session_id: str, visitor_id: str) -> dict:
     ensure_visitor(session_id, visitor_id)
     with database() as connection:
         row = connection.execute(
-            "SELECT minutes_markdown, retrospective_markdown, missing_dimensions, created_at FROM room_reports WHERE session_id = ?",
+            "SELECT minutes_markdown, proposal_markdown, retrospective_markdown, missing_dimensions, created_at FROM room_reports WHERE session_id = ?",
             (session_id,),
         ).fetchone()
     if not row:
@@ -1914,14 +1915,14 @@ def get_room_report(session_id: str, visitor_id: str) -> dict:
 @app.get("/api/rooms/{session_id}/report/export.md")
 def export_room_report_markdown(session_id: str, visitor_id: str) -> Response:
     report = get_room_report(session_id, visitor_id)
-    content = f"{report['minutes_markdown']}\n\n---\n\n{report['retrospective_markdown']}\n"
+    content = f"{report['minutes_markdown']}\n\n---\n\n{report['proposal_markdown']}\n\n---\n\n{report['retrospective_markdown']}\n"
     return Response(content, media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": "attachment; filename=roomai-report.md"})
 
 
 @app.get("/api/rooms/{session_id}/report/export.docx")
 def export_room_report_docx(session_id: str, visitor_id: str) -> Response:
     report = get_room_report(session_id, visitor_id)
-    content = f"{report['minutes_markdown']}\n\n---\n\n{report['retrospective_markdown']}"
+    content = f"{report['minutes_markdown']}\n\n---\n\n{report['proposal_markdown']}\n\n---\n\n{report['retrospective_markdown']}"
     try:
         document = markdown_to_docx(content)
     except ImportError as exc:
