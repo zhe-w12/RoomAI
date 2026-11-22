@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import difflib
+import json
+import re
+from datetime import datetime, timezone
+
+from ..database import database
+from .agent import complete_chat, history_message
+
+
+DIMENSIONS = ("feasibility", "people_cost", "timeline", "risk", "innovation", "team_fit")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _clean_list(value, limit: int = 8) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip()[:600] for item in value if str(item).strip()][:limit]
+
+
+def _normalized(value: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", value.casefold())
+
+
+def _same_idea(first: str, second: str) -> bool:
+    a, b = _normalized(first), _normalized(second)
+    if not a or not b:
+        return False
+    if a in b or b in a:
+        return min(len(a), len(b)) >= 7
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.84
+
+
+def _format_summary(summary: dict, version: int, ideas: list[dict]) -> str:
+    consensus = _clean_list(summary.get("consensus"))
+    disagreements = _clean_list(summary.get("disagreements"))
+    todos = summary.get("todos") if isinstance(summary.get("todos"), list) else []
+    lines = [f"### 本轮讨论总结 · v{version}", "", "**共识**"]
+    lines.extend(f"- {item}" for item in consensus or ["暂时还没有形成明确共识。"])
+    lines.extend(["", "**分歧**"])
+    lines.extend(f"- {item}" for item in disagreements or ["暂未发现明确分歧。"])
+    lines.extend(["", "**待办**"])
+    for item in todos[:8]:
+        if isinstance(item, dict) and item.get("title"):
+            assignee = str(item.get("assignee", "")).strip()
+            lines.append(f"- {item['title']}{f'（负责人：{assignee}）' if assignee else ''}")
+    if not any(isinstance(item, dict) and item.get("title") for item in todos):
+        lines.append("- 暂无明确待办。")
+    if ideas:
+        lines.extend(["", "**本轮新想法**"])
+        for idea in ideas[:5]:
+            score = idea.get("average_score")
+            label = f" · 评估 {score:.1f}/5" if isinstance(score, (int, float)) else ""
+            lines.append(f"- **{idea['title']}**{label}：{idea['description']}")
+    return "\n".join(lines)
+
+
+async def analyze_room(session_id: str, model: str, *, force: bool = False) -> dict | None:
+    with database() as connection:
+        room = connection.execute("SELECT * FROM rooms WHERE session_id = ?", (session_id,)).fetchone()
+        if not room:
+            return None
+        latest_summary = connection.execute(
+            "SELECT * FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
+        ).fetchone()
+        through_id = int(latest_summary["through_message_id"]) if latest_summary else 0
+        rows = connection.execute(
+            """SELECT m.*, r.sender_name AS reply_sender_name, r.content AS reply_content,
+                      r.is_recalled AS reply_is_recalled
+               FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id
+               WHERE m.session_id = ? AND m.id > ? ORDER BY m.id DESC LIMIT 30""",
+            (session_id, through_id),
+        ).fetchall()
+        recent = [dict(row) for row in reversed(rows) if not row["is_recalled"]]
+        latest_message = connection.execute(
+            "SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE session_id = ?", (session_id,)
+        ).fetchone()["id"]
+        existing_ideas = connection.execute(
+            """SELECT i.id, i.title, i.description, i.proposer_name,
+                      (SELECT e.dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions
+               FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC LIMIT 20""",
+            (session_id,),
+        ).fetchall()
+        members = [row["nickname"] for row in connection.execute(
+            "SELECT nickname FROM visitors WHERE session_id = ?", (session_id,)
+        ).fetchall()]
+    if not recent and not force:
+        return None
+    previous = json.loads(latest_summary["content"]) if latest_summary else {}
+    prompt = {
+        "previous_summary": previous,
+        "known_ideas": [dict(item) for item in existing_ideas],
+        "member_names": members,
+        "messages": [
+            {"sender": item["sender_name"], "content": item["content"], "id": item["id"]}
+            for item in recent
+        ],
+    }
+    system = (
+        "你是 RoomAI 的讨论分析员。只整理消息中真实出现的观点，不要补充事实。"
+        "从最近消息增量更新滚动总结，识别值得进入想法池的新想法，并按 1-5 分评估六个维度。"
+        "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称，"
+        "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务。"
+        "只返回 JSON，格式为："
+        '{"summary":{"consensus":["..."],"disagreements":["..."],"todos":[{"title":"...","assignee":""}],'
+        '"dimension_coverage":{"user":false,"technology":false,"time":false,"cost":false,"risk":false}},'
+        '"ideas":[{"title":"...","description":"...","proposer_name":"","source_message_id":1,"merge_into":null,'
+        '"dimensions":{"feasibility":3,"people_cost":3,"timeline":3,"risk":3,"innovation":3,"team_fit":3},"rationale":"..."}]}。'
+        "ideas 最多 5 个；没有就返回空数组。每个评分都应有简短理由，证据不足时 dimensions 返回空对象。"
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+    ]
+    # Include recent uploaded images as multimodal inputs when available.
+    multimodal = [history_message(item) for item in recent]
+    if any(isinstance(item.get("content"), list) for item in multimodal):
+        messages[1]["content"] = [
+            {"type": "text", "text": json.dumps(prompt, ensure_ascii=False)},
+            *[
+                part
+                for message in multimodal
+                if isinstance(message.get("content"), list)
+                for part in message["content"]
+                if part.get("type") == "image_url"
+            ],
+        ]
+    result = None
+    payload = None
+    for attempt in range(2):
+        result = await complete_chat(messages, model=model, session_id=session_id, json_mode=True, temperature=0.2)
+        if not result:
+            return None
+        try:
+            payload = json.loads(result["content"])
+            break
+        except (json.JSONDecodeError, TypeError):
+            if attempt == 1:
+                return None
+            messages = [*messages, {"role": "user", "content": "上一条输出不是有效 JSON。请按指定 JSON 格式重新输出，不要使用 Markdown 代码围栏。"}]
+    summary_data = payload.get("summary") if isinstance(payload, dict) else None
+    if not isinstance(summary_data, dict):
+        return None
+    todos = []
+    for item in summary_data.get("todos", []):
+        if isinstance(item, dict) and str(item.get("title", "")).strip():
+            todos.append({"title": str(item["title"]).strip()[:300], "assignee": str(item.get("assignee", "")).strip()[:80]})
+    raw_coverage = summary_data.get("dimension_coverage") if isinstance(summary_data.get("dimension_coverage"), dict) else {}
+    summary_data = {
+        "consensus": _clean_list(summary_data.get("consensus")),
+        "disagreements": _clean_list(summary_data.get("disagreements")),
+        "todos": todos[:8],
+        "dimension_coverage": {
+            key: bool(raw_coverage.get(key, False))
+            for key in ("user", "technology", "time", "cost", "risk")
+        },
+    }
+    created_at = _now()
+    saved_ideas: list[dict] = []
+    with database() as connection:
+        version = connection.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM summaries WHERE session_id = ?", (session_id,)
+        ).fetchone()["version"]
+        connection.execute(
+            "INSERT INTO summaries (session_id, version, content, through_message_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (session_id, version, json.dumps(summary_data, ensure_ascii=False), latest_message, created_at),
+        )
+        valid_source_ids = {int(item["id"]) for item in recent}
+        known_member_names = set(members)
+        for raw in (payload.get("ideas") or [])[:5]:
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title", "")).strip()[:160]
+            description = str(raw.get("description", "")).strip()[:900]
+            if len(title) < 3 or not description:
+                continue
+            merge_id = raw.get("merge_into")
+            found = None
+            if isinstance(merge_id, int):
+                found = connection.execute(
+                    "SELECT id FROM ideas WHERE id = ? AND session_id = ?", (merge_id, session_id)
+                ).fetchone()
+            if not found:
+                for known in connection.execute("SELECT id, title FROM ideas WHERE session_id = ?", (session_id,)).fetchall():
+                    if _same_idea(title, known["title"]):
+                        found = known
+                        break
+            proposer = str(raw.get("proposer_name", "")).strip()
+            if proposer not in known_member_names:
+                proposer = ""
+            source_id = raw.get("source_message_id")
+            if not isinstance(source_id, int) or source_id not in valid_source_ids:
+                source_id = None
+            if found:
+                idea_id = found["id"]
+                connection.execute(
+                    "UPDATE ideas SET description = ?, updated_at = ? WHERE id = ?",
+                    (description, created_at, idea_id),
+                )
+            else:
+                cursor = connection.execute(
+                    "INSERT INTO ideas (session_id, title, description, proposer_name, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, title, description, proposer, source_id, created_at, created_at),
+                )
+                idea_id = cursor.lastrowid
+            dimensions = raw.get("dimensions") if isinstance(raw.get("dimensions"), dict) else {}
+            valid_dimensions = {
+                key: min(5, max(1, int(dimensions[key])))
+                for key in DIMENSIONS
+                if isinstance(dimensions.get(key), (int, float)) and 1 <= int(dimensions[key]) <= 5
+            }
+            rationale = str(raw.get("rationale", "")).strip()[:500]
+            if valid_dimensions:
+                connection.execute(
+                    "INSERT INTO evaluations (idea_id, dimensions, rationale, model, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (idea_id, json.dumps(valid_dimensions), rationale, model, created_at),
+                )
+            idea = connection.execute(
+                """SELECT i.*, (SELECT dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions,
+                          (SELECT rationale FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS rationale
+                   FROM ideas i WHERE i.id = ?""", (idea_id,)
+            ).fetchone()
+            item = dict(idea)
+            item["dimensions"] = json.loads(item["dimensions"] or "{}")
+            item["average_score"] = round(sum(item["dimensions"].values()) / len(item["dimensions"]), 1) if item["dimensions"] else None
+            saved_ideas.append(item)
+        for todo in summary_data["todos"]:
+            title = str(todo.get("title", "")).strip()[:300]
+            if not title:
+                continue
+            assignee = str(todo.get("assignee", "")).strip()[:80]
+            existing = connection.execute(
+                "SELECT id FROM todos WHERE session_id = ? AND title = ? COLLATE NOCASE AND status = 'open' ORDER BY id DESC LIMIT 1",
+                (session_id, title),
+            ).fetchone()
+            if existing:
+                connection.execute("UPDATE todos SET assignee = ?, updated_at = ? WHERE id = ?", (assignee, created_at, existing["id"]))
+            else:
+                connection.execute(
+                    "INSERT INTO todos (session_id, title, assignee, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (session_id, title, assignee, created_at, created_at),
+                )
+    summary_data["version"] = version
+    summary_data["through_message_id"] = latest_message
+    summary_data["created_at"] = created_at
+    return {
+        "summary": summary_data,
+        "ideas": saved_ideas,
+        "message": _format_summary(summary_data, version, saved_ideas),
+        "model": result["model"],
+    }

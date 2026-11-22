@@ -48,6 +48,65 @@ CREATE TABLE IF NOT EXISTS mentions (
     is_read INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    through_message_id INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(session_id, version)
+);
+CREATE INDEX IF NOT EXISTS summaries_session_version ON summaries(session_id, version DESC);
+CREATE TABLE IF NOT EXISTS ideas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    proposer_name TEXT NOT NULL DEFAULT '',
+    source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'considering',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ideas_session_updated ON ideas(session_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+    dimensions TEXT NOT NULL DEFAULT '{}',
+    rationale TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS evaluations_idea_created ON evaluations(idea_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS idea_votes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+    visitor_id TEXT REFERENCES visitors(visitor_id) ON DELETE SET NULL,
+    stance TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(idea_id, visitor_id)
+);
+CREATE TABLE IF NOT EXISTS todos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    assignee TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open',
+    source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_estimate REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_session_model ON usage(session_id, model);
 """
 
 

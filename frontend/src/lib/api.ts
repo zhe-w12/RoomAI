@@ -12,11 +12,46 @@ export type Room = {
   topic: string;
   invite_code: string;
   model: string;
+  available_models: string[];
   phase: "diverge" | "converge";
   prep_checklist: string[];
   members: Member[];
   unread_mentions: number;
   created_at: string;
+};
+
+export type SummaryContent = {
+  consensus: string[];
+  disagreements: string[];
+  todos: { title: string; assignee?: string }[];
+  dimension_coverage: Record<string, boolean>;
+};
+
+export type SummaryVersion = {
+  version: number;
+  content: SummaryContent;
+  through_message_id: number;
+  created_at: string;
+};
+
+export type Idea = {
+  id: number;
+  title: string;
+  description: string;
+  proposer_name: string;
+  source_message_id: number | null;
+  status: string;
+  dimensions: Record<string, number>;
+  rationale: string;
+  average_score: number | null;
+};
+
+export type RoomUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_estimate: number;
+  cost_configured: boolean;
 };
 
 export type Message = {
@@ -66,6 +101,12 @@ export const api = {
     request<Room>(`/api/rooms/${sessionId}?visitor_id=${encodeURIComponent(visitorId)}`),
   getMessages: (sessionId: string, visitorId: string) =>
     request<Message[]>(`/api/rooms/${sessionId}/messages?visitor_id=${encodeURIComponent(visitorId)}`),
+  getSummary: (sessionId: string, visitorId: string) =>
+    request<{ latest: SummaryVersion | null; history: SummaryVersion[] }>(`/api/rooms/${sessionId}/summary?visitor_id=${encodeURIComponent(visitorId)}`),
+  getIdeas: (sessionId: string, visitorId: string) =>
+    request<{ ideas: Idea[] }>(`/api/rooms/${sessionId}/ideas?visitor_id=${encodeURIComponent(visitorId)}`),
+  getUsage: (sessionId: string, visitorId: string) =>
+    request<RoomUsage>(`/api/rooms/${sessionId}/usage?visitor_id=${encodeURIComponent(visitorId)}`),
   getMentions: (sessionId: string, visitorId: string) =>
     request<{ message_ids: number[] }>(`/api/rooms/${sessionId}/mentions?visitor_id=${encodeURIComponent(visitorId)}`),
   markMentionsRead: (sessionId: string, identity: Identity, message_ids: number[]) =>
@@ -87,6 +128,11 @@ export const api = {
     request<{ phase: Room["phase"] }>(`/api/rooms/${sessionId}/phase`, {
       method: "PUT",
       body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, phase }),
+    }),
+  setModel: (sessionId: string, identity: Identity, model: string) =>
+    request<{ model: string }>(`/api/rooms/${sessionId}/model`, {
+      method: "PUT",
+      body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, model }),
     }),
   imageUrl: (path: string) => `${API_BASE}${path}`,
   socketUrl: (sessionId: string, visitorId: string) => {

@@ -1,7 +1,7 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Activity, AtSign, ArrowDown, ArrowRight, Check, ChevronDown, CircleHelp, Clipboard, ClipboardCheck, Command, Copy, FileImage, ImagePlus, Lightbulb, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Reply, Search, Send, Sparkles, Undo2, Users, X } from "lucide-react";
-import { api, Identity, loadIdentity, Member, Message, Room, saveIdentity } from "../lib/api";
+import { Activity, AtSign, ArrowDown, ArrowRight, Check, ChevronDown, CircleHelp, Clipboard, ClipboardCheck, Command, Copy, FileImage, ImagePlus, Lightbulb, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Reply, Search, Send, Settings2, Sparkles, Undo2, Users, X } from "lucide-react";
+import { api, Identity, Idea, loadIdentity, Member, Message, Room, RoomUsage, saveIdentity, SummaryVersion } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 
 const commands = ["/总结", "/评估", "/投票", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
@@ -21,6 +21,9 @@ export default function RoomPage() {
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [room, setRoom] = useState<Room | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [summary, setSummary] = useState<SummaryVersion | null>(null);
+  const [ideas, setIdeas] = useState<Idea[]>([]);
+  const [usage, setUsage] = useState<RoomUsage | null>(null);
   const [unreadMentionIds, setUnreadMentionIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [roomError, setRoomError] = useState("");
@@ -30,6 +33,8 @@ export default function RoomPage() {
   const [newMessages, setNewMessages] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modelSaving, setModelSaving] = useState(false);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [composerValue, setComposerValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -75,14 +80,20 @@ export default function RoomPage() {
       }
       setIdentity(storedIdentity);
       try {
-        const [nextRoom, nextMessages, mentions] = await Promise.all([
+        const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage] = await Promise.all([
           api.getRoom(sessionId, storedIdentity.visitor_id),
           api.getMessages(sessionId, storedIdentity.visitor_id),
           api.getMentions(sessionId, storedIdentity.visitor_id),
+          api.getSummary(sessionId, storedIdentity.visitor_id),
+          api.getIdeas(sessionId, storedIdentity.visitor_id),
+          api.getUsage(sessionId, storedIdentity.visitor_id),
         ]);
         if (canceled) return;
         setRoom(nextRoom);
         setMessages(nextMessages);
+        setSummary(nextSummary.latest);
+        setIdeas(nextIdeas.ideas);
+        setUsage(nextUsage);
         setUnreadMentionIds(mentions.message_ids);
       } catch (err) {
         if (canceled) return;
@@ -113,6 +124,9 @@ export default function RoomPage() {
           if (data.type === "message" && incoming.visitor_id !== identity.visitor_id && incoming.content.includes(`@${identity.nickname}`)) {
             setUnreadMentionIds((current) => [...new Set([...current, incoming.id])]);
           }
+          if (data.type === "message" && incoming.sender_type === "agent") {
+            void api.getUsage(sessionId, identity.visitor_id).then(setUsage).catch(() => undefined);
+          }
         }
         if (data.type === "presence") setOnlineIds((data.members as Member[]).map((member) => member.visitor_id));
         if (data.type === "typing" && data.visitor_id !== identity.visitor_id) {
@@ -120,6 +134,17 @@ export default function RoomPage() {
           if (data.active && data.visitor_id !== "roomai") window.setTimeout(() => setTypingNames((current) => current.filter((name) => name !== data.nickname)), 3200);
         }
         if (data.type === "phase_changed") setRoom((current) => current ? { ...current, phase: data.phase } : current);
+        if (data.type === "model_changed") setRoom((current) => current ? { ...current, model: data.model } : current);
+        if (data.type === "summary_update") {
+          setSummary({
+            version: data.summary.version,
+            content: data.summary,
+            through_message_id: data.summary.through_message_id,
+            created_at: data.summary.created_at,
+          } as SummaryVersion);
+          void api.getUsage(sessionId, identity.visitor_id).then(setUsage).catch(() => undefined);
+        }
+        if (data.type === "idea_update") setIdeas(data.ideas as Idea[]);
       } catch {
         // Ignore malformed events and keep the chat connection alive.
       }
@@ -157,9 +182,15 @@ export default function RoomPage() {
       const joined = await api.joinByLink(sessionId, joinName.trim());
       saveIdentity(joined);
       setIdentity(joined);
-      const [nextRoom, nextMessages, mentions] = await Promise.all([api.getRoom(sessionId, joined.visitor_id), api.getMessages(sessionId, joined.visitor_id), api.getMentions(sessionId, joined.visitor_id)]);
+      const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage] = await Promise.all([
+        api.getRoom(sessionId, joined.visitor_id), api.getMessages(sessionId, joined.visitor_id), api.getMentions(sessionId, joined.visitor_id),
+        api.getSummary(sessionId, joined.visitor_id), api.getIdeas(sessionId, joined.visitor_id), api.getUsage(sessionId, joined.visitor_id),
+      ]);
       setRoom(nextRoom);
       setMessages(nextMessages);
+      setSummary(nextSummary.latest);
+      setIdeas(nextIdeas.ideas);
+      setUsage(nextUsage);
       setUnreadMentionIds(mentions.message_ids);
     } catch (err) {
       setRoomError(err instanceof Error ? err.message : "无法加入房间");
@@ -297,6 +328,19 @@ export default function RoomPage() {
     } catch (err) { setError(err instanceof Error ? err.message : "切换阶段失败"); }
   }
 
+  async function changeModel(model: string) {
+    if (!identity || !room || !identity.owner_token || modelSaving) return;
+    setModelSaving(true);
+    try {
+      await api.setModel(sessionId, identity, model);
+      setRoom((current) => current ? { ...current, model } : current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "切换模型失败");
+    } finally {
+      setModelSaving(false);
+    }
+  }
+
   async function copyInvite() {
     try {
       await navigator.clipboard.writeText(`${window.location.origin}/room/${sessionId}`);
@@ -384,18 +428,27 @@ export default function RoomPage() {
 
       <section className="sidebar-panel summary-panel">
         <div className="panel-heading"><span className="panel-icon panel-icon-violet"><Sparkles size={15} /></span><h3>滚动总结</h3><span className="coming-pill">AI</span></div>
-        <p className="panel-empty">讨论开始后，RoomAI 会在这里整理共识、分歧和待办。</p>
-        <div className="summary-progress"><span /><span /><span /></div>
+        {summary ? <>
+          <div className="summary-version">最近更新 · v{summary.version}</div>
+          <div className="summary-items">{(summary.content.consensus.length ? summary.content.consensus : ["暂时还没有形成明确共识。 "]).slice(0, 3).map((item, index) => <p key={`${index}-${item}`}>{item}</p>)}</div>
+          {summary.content.disagreements.length > 0 && <div className="summary-note"><b>待讨论</b><span>{summary.content.disagreements[0]}</span></div>}
+          {summary.content.todos.length > 0 && <div className="summary-note summary-todo"><b>下一步</b><span>{summary.content.todos[0].title}{summary.content.todos[0].assignee ? ` · ${summary.content.todos[0].assignee}` : ""}</span></div>}
+        </> : <p className="panel-empty">讨论开始后，RoomAI 会在这里整理共识、分歧和待办。</p>}
       </section>
 
       <section className="sidebar-panel idea-panel">
-        <div className="panel-heading"><span className="panel-icon panel-icon-amber"><Lightbulb size={15} /></span><h3>想法池</h3><span className="count-pill">0</span></div>
-        <div className="idea-empty"><div className="idea-empty-mark"><Plus size={15} /></div><span>值得做的想法，会在讨论中浮现</span></div>
+        <div className="panel-heading"><span className="panel-icon panel-icon-amber"><Lightbulb size={15} /></span><h3>想法池</h3><span className="count-pill">{ideas.length}</span></div>
+        {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <button className="idea-item" key={idea.id} onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
+          <span className="idea-item-title">{idea.title}</span><span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}</span>
+        </button>)}</div> : <div className="idea-empty"><div className="idea-empty-mark"><Plus size={15} /></div><span>值得做的想法，会在讨论中浮现</span></div>}
       </section>
 
       <section className="sidebar-panel dimensions-panel">
         <div className="panel-heading"><span className="panel-icon panel-icon-green"><Activity size={15} /></span><h3>讨论维度</h3></div>
-        <div className="dimension-list">{["用户", "技术", "时间", "成本", "风险"].map((item) => <div className="dimension-row" key={item}><span className="dimension-dot" />{item}<span>待聊</span></div>)}</div>
+        <div className="dimension-list">{[["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]].map(([label, key]) => {
+          const covered = Boolean(summary?.content.dimension_coverage[key]);
+          return <div className={`dimension-row ${covered ? "dimension-covered" : ""}`} key={key}><span className="dimension-dot" />{label}<span>{covered ? "已讨论" : "待聊"}</span></div>;
+        })}</div>
       </section>
 
       <div className="sidebar-spacer" />
@@ -413,7 +466,8 @@ export default function RoomPage() {
           <span className="topbar-separator" />
           {unreadMentionIds.length > 0 && <button className="mention-notice" onClick={() => void openUnreadMention()} title="跳转到未读 @ 提醒"><AtSign size={15} /><span>{unreadMentionIds.length}</span></button>}
           <button className={`icon-button top-action ${searchOpen ? "active" : ""}`} onClick={() => { setSearchOpen((value) => !value); setSearch(""); }} aria-label="搜索消息"><Search size={18} /></button>
-          <button className="icon-button top-action settings-action" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={18} /> : <Clipboard size={18} />}</button>
+          <button className="icon-button top-action settings-action" onClick={() => setSettingsOpen(true)} aria-label="房间设置" title="房间设置"><Settings2 size={18} /></button>
+          <button className="icon-button top-action" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={18} /> : <Clipboard size={18} />}</button>
         </div>
       </header>
 
@@ -484,7 +538,7 @@ export default function RoomPage() {
             <div className="composer-input-wrap">
               {showCommands && <div className="suggestion-menu command-menu">{commands.filter((command) => command.startsWith(composerValue.slice(commandEnd))).map((command) => <button type="button" onClick={() => void selectCommand(command)} key={command}><span>{command}</span><small>RoomAI 快捷指令</small><ChevronDown size={14} /></button>)}</div>}
               {mentionMatch && mentionOptions.length > 0 && <div className="suggestion-menu mention-menu"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-small avatar-ai"><Sparkles size={13} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className={`avatar avatar-small ${avatarColor(member.nickname)}`}>{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
-              <textarea ref={composerRef} rows={1} value={composerValue} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder="说说你的想法…（输入 / 查看指令，@ 提及伙伴）" />
+              <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder="说说你的想法…（输入 / 查看指令，@ 提及伙伴）" />
             </div>
             <button className="send-button" disabled={sending || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={18} className="spin" /> : <Send size={17} />}</button>
           </form>
@@ -492,5 +546,18 @@ export default function RoomPage() {
         </div>
       </section>
     </section>
+    {settingsOpen && <div className="settings-backdrop" onClick={() => setSettingsOpen(false)}>
+      <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onClick={(event) => event.stopPropagation()}>
+        <div className="settings-dialog-heading"><div><span className="eyebrow">ROOM SETTINGS</span><h2 id="settings-title">房间设置</h2></div><button className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="关闭设置"><X size={18} /></button></div>
+        <div className="settings-block"><label className="field-label" htmlFor="model-select">讨论模型</label>
+          <select id="model-select" value={room.model} disabled={!identity.owner_token || modelSaving || room.available_models.length < 2} onChange={(event) => void changeModel(event.target.value)}>
+            {room.available_models.map((model) => <option key={model} value={model}>{model}</option>)}
+          </select>
+          <small>{identity.owner_token ? "切换后仅影响之后的新调用。" : "只有房主可以切换模型。"}</small>
+        </div>
+        <div className="settings-usage"><b>本次讨论用量</b><span>{(usage?.total_tokens || 0).toLocaleString("zh-CN")} tokens</span><small>{usage?.cost_configured ? `估算费用 ¥${usage.cost_estimate.toFixed(4)}` : "费用价格未配置；可在 .env 设置模型单价。"}</small></div>
+        <div className="settings-block"><button className="button button-secondary button-submit" onClick={() => void copyInvite()}>{linkCopied ? <ClipboardCheck size={16} /> : <Clipboard size={16} />} {linkCopied ? "已复制邀请链接" : "复制邀请链接"}</button><small>房主凭证保存在当前浏览器，清除浏览器数据后将无法管理房间。</small></div>
+      </section>
+    </div>}
   </main>;
 }

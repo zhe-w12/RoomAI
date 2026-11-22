@@ -5,19 +5,34 @@ import asyncio
 import re
 import secrets
 import uuid
+import json
+import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import FRONTEND_ORIGIN, MODEL_NAME, UPLOAD_DIR
+from .config import (
+    AVAILABLE_MODELS,
+    FALLBACK_TRIGGER_MESSAGES,
+    FRONTEND_ORIGIN,
+    IDLE_TRIGGER_MIN_MESSAGES,
+    IDLE_TRIGGER_SECONDS,
+    MODEL_INPUT_PRICE_PER_MILLION,
+    MODEL_NAME,
+    MODEL_OUTPUT_PRICE_PER_MILLION,
+    MODEL_PRICES,
+    UPLOAD_DIR,
+)
 from .database import database, initialize_database
 from .realtime import manager, visitor_for_session
 from .services.brief import create_room_brief
 from .services.agent import COMMAND_PROMPTS, answer_room_prompt
+from .services.analysis import analyze_room
 
 
 app = FastAPI(title="RoomAI API", version="0.1.0")
@@ -74,7 +89,7 @@ class JoinByLinkRequest(BaseModel):
 
 class MessageRequest(BaseModel):
     visitor_id: str
-    content: str = Field(default="", max_length=10000)
+    content: str = Field(default="", max_length=2000)
     reply_to_message_id: int | None = None
     image_url: str | None = None
 
@@ -85,9 +100,20 @@ class PhaseRequest(BaseModel):
     phase: str = Field(pattern="^(diverge|converge)$")
 
 
+class ModelRequest(BaseModel):
+    visitor_id: str
+    owner_token: str = Field(min_length=1)
+    model: str = Field(min_length=1, max_length=120)
+
+
 class ReadMentionsRequest(BaseModel):
     visitor_id: str
     message_ids: list[int] | None = None
+
+
+_idle_tasks: dict[str, asyncio.Task] = {}
+_analysis_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_message_rate: defaultdict[str, deque[float]] = defaultdict(deque)
 
 
 def create_message_record(
@@ -157,6 +183,79 @@ def message_dict(row) -> dict:
     return item
 
 
+def pending_user_messages(session_id: str) -> int:
+    with database() as connection:
+        row = connection.execute(
+            """SELECT COUNT(*) AS count FROM messages
+               WHERE session_id = ? AND id > COALESCE((SELECT through_message_id FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1), 0)
+                 AND sender_type = 'user' AND is_recalled = 0""",
+            (session_id, session_id),
+        ).fetchone()
+    return int(row["count"])
+
+
+async def publish_room_analysis(session_id: str) -> dict | None:
+    async with _analysis_locks[session_id]:
+        room = ensure_room(session_id)
+        result = await analyze_room(session_id, room["model"])
+        if not result:
+            message = create_message_record(
+                session_id, None, "RoomAI", "agent", "AI 暂时没反应，请稍后再试。讨论消息已经保留。", now_iso()
+            )
+            await manager.broadcast(session_id, {"type": "message", "message": message})
+            return None
+        message = create_message_record(session_id, None, "RoomAI", "agent", result["message"], now_iso())
+        await manager.broadcast(session_id, {"type": "message", "message": message})
+        await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
+        ideas = get_ideas_for_event(session_id)
+        await manager.broadcast(session_id, {"type": "idea_update", "ideas": ideas})
+        return result
+
+
+def get_ideas_for_event(session_id: str) -> list[dict]:
+    with database() as connection:
+        rows = connection.execute(
+            """SELECT i.*,
+                      (SELECT dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions,
+                      (SELECT rationale FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS rationale
+               FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC""",
+            (session_id,),
+        ).fetchall()
+    ideas = []
+    for row in rows:
+        item = dict(row)
+        item["dimensions"] = json.loads(item["dimensions"] or "{}")
+        scores = list(item["dimensions"].values())
+        item["average_score"] = round(sum(scores) / len(scores), 1) if scores else None
+        ideas.append(item)
+    return ideas
+
+
+async def _wait_and_analyze(session_id: str) -> None:
+    try:
+        await asyncio.sleep(IDLE_TRIGGER_SECONDS)
+        if pending_user_messages(session_id) >= IDLE_TRIGGER_MIN_MESSAGES:
+            await publish_room_analysis(session_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return
+    finally:
+        current = asyncio.current_task()
+        if _idle_tasks.get(session_id) is current:
+            _idle_tasks.pop(session_id, None)
+
+
+def schedule_room_analysis(session_id: str) -> None:
+    existing = _idle_tasks.pop(session_id, None)
+    if existing and not existing.done():
+        existing.cancel()
+    if pending_user_messages(session_id) >= FALLBACK_TRIGGER_MESSAGES:
+        asyncio.create_task(publish_room_analysis(session_id))
+    else:
+        _idle_tasks[session_id] = asyncio.create_task(_wait_and_analyze(session_id))
+
+
 @app.on_event("startup")
 def startup() -> None:
     initialize_database()
@@ -201,7 +300,7 @@ async def create_room(payload: CreateRoomRequest) -> dict:
         except Exception:
             raise
 
-    brief = await create_room_brief(topic)
+    brief = await create_room_brief(topic, session_id=session_id, model=MODEL_NAME)
     with database() as connection:
         connection.execute(
             "UPDATE rooms SET prep_checklist = ? WHERE session_id = ?",
@@ -290,6 +389,7 @@ def get_room(session_id: str, visitor_id: str) -> dict:
         "invite_code": room["invite_code"],
         "model": room["model"],
         "phase": room["phase"],
+        "available_models": list(dict.fromkeys([room["model"], *AVAILABLE_MODELS])),
         "prep_checklist": json.loads(room["prep_checklist"]),
         "members": [dict(member) for member in members],
         "unread_mentions": unread_mentions,
@@ -309,6 +409,100 @@ def get_messages(session_id: str, visitor_id: str) -> list[dict]:
             (session_id,),
         ).fetchall()
         return [message_dict(row) for row in rows]
+
+
+@app.get("/api/rooms/{session_id}/summary")
+def get_summaries(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    with database() as connection:
+        rows = connection.execute(
+            "SELECT version, content, through_message_id, created_at FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 20",
+            (session_id,),
+        ).fetchall()
+    history = []
+    for row in rows:
+        item = dict(row)
+        item["content"] = json.loads(item["content"])
+        history.append(item)
+    return {"latest": history[0] if history else None, "history": history}
+
+
+@app.get("/api/rooms/{session_id}/ideas")
+def get_ideas(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    with database() as connection:
+        rows = connection.execute(
+            """SELECT i.*,
+                      (SELECT dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions,
+                      (SELECT rationale FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS rationale,
+                      (SELECT COUNT(*) FROM idea_votes iv WHERE iv.idea_id = i.id AND iv.stance = 'support') AS support_count
+               FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC""",
+            (session_id,),
+        ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["dimensions"] = json.loads(item["dimensions"] or "{}")
+        scores = list(item["dimensions"].values())
+        item["average_score"] = round(sum(scores) / len(scores), 1) if scores else None
+        items.append(item)
+    return {"ideas": items}
+
+
+@app.get("/api/rooms/{session_id}/usage")
+def get_usage(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    with database() as connection:
+        rows = connection.execute(
+            """SELECT model, SUM(prompt_tokens) AS prompt_tokens,
+                      SUM(completion_tokens) AS completion_tokens, SUM(cost_estimate) AS cost_estimate
+               FROM usage WHERE session_id = ? GROUP BY model ORDER BY model""",
+            (session_id,),
+        ).fetchall()
+    models = [dict(row) for row in rows]
+    return {
+        "models": models,
+        "prompt_tokens": sum(row["prompt_tokens"] for row in models),
+        "completion_tokens": sum(row["completion_tokens"] for row in models),
+        "total_tokens": sum(row["prompt_tokens"] + row["completion_tokens"] for row in models),
+        "cost_estimate": round(sum(row["cost_estimate"] for row in models), 6),
+        "cost_configured": (
+            MODEL_INPUT_PRICE_PER_MILLION > 0
+            or MODEL_OUTPUT_PRICE_PER_MILLION > 0
+            or any(row["model"] in MODEL_PRICES and any(MODEL_PRICES[row["model"]].values()) for row in models)
+        ),
+    }
+
+
+@app.get("/api/rooms/{session_id}/search")
+def search_room(session_id: str, visitor_id: str, q: str = Query(min_length=1, max_length=100)) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    query = f"%{q.strip()}%"
+    if not q.strip():
+        return {"results": []}
+    with database() as connection:
+        messages = connection.execute(
+            """SELECT id, sender_name AS title, content AS excerpt, created_at, id AS source_message_id
+               FROM messages WHERE session_id = ? AND is_recalled = 0 AND (content LIKE ? OR sender_name LIKE ?)
+               ORDER BY id DESC LIMIT 30""",
+            (session_id, query, query),
+        ).fetchall()
+        ideas = connection.execute(
+            """SELECT id, title, description AS excerpt, updated_at AS created_at, source_message_id
+               FROM ideas WHERE session_id = ? AND (title LIKE ? OR description LIKE ?) ORDER BY updated_at DESC LIMIT 20""",
+            (session_id, query, query),
+        ).fetchall()
+        summaries = connection.execute(
+            "SELECT version AS id, content, created_at FROM summaries WHERE session_id = ? AND content LIKE ? ORDER BY version DESC LIMIT 20",
+            (session_id, query),
+        ).fetchall()
+    results = [{"type": "message", **dict(row)} for row in messages]
+    results.extend({"type": "idea", **dict(row)} for row in ideas)
+    for row in summaries:
+        data = json.loads(row["content"])
+        results.append({"type": "summary", "id": row["id"], "title": f"讨论总结 v{row['id']}", "excerpt": "；".join(data.get("consensus", [])), "created_at": row["created_at"], "source_message_id": None})
+    results.sort(key=lambda item: item["created_at"], reverse=True)
+    return {"results": results[:50]}
 
 
 @app.get("/api/rooms/{session_id}/mentions")
@@ -360,6 +554,13 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
             ).fetchone()
         if not replied:
             raise HTTPException(status_code=404, detail="引用的消息不存在")
+    rate = _message_rate[visitor["visitor_id"]]
+    now_tick = time.monotonic()
+    while rate and now_tick - rate[0] >= 10:
+        rate.popleft()
+    if len(rate) >= 5:
+        raise HTTPException(status_code=429, detail="10 秒内最多发送 5 条消息，请稍后再试")
+    rate.append(now_tick)
     message = create_message_record(
         session_id,
         payload.visitor_id,
@@ -371,8 +572,15 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         image_path,
     )
     await manager.broadcast(session_id, {"type": "message", "message": message})
+    schedule_room_analysis(session_id)
     prompt = ai_prompt(content)
-    if prompt:
+    is_summary_request = content.startswith(("/总结", "/评估")) or (
+        re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE)
+        and re.search(r"总结|梳理共识|评估想法", content)
+    )
+    if is_summary_request:
+        asyncio.create_task(publish_room_analysis(session_id))
+    elif prompt:
         asyncio.create_task(generate_agent_reply(session_id, prompt))
     return message
 
@@ -399,14 +607,29 @@ async def generate_agent_reply(session_id: str, prompt: str) -> None:
         room = ensure_room(session_id)
         with database() as connection:
             history = [dict(row) for row in connection.execute(
-                "SELECT sender_name, sender_type, content, image_path, is_recalled FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 30",
+                """SELECT m.sender_name, m.sender_type, m.content, m.image_path, m.is_recalled,
+                          r.sender_name AS reply_sender_name, r.content AS reply_content
+                   FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id
+                   WHERE m.session_id = ? ORDER BY m.id DESC LIMIT 30""",
                 (session_id,),
             ).fetchall()]
+            summary_row = connection.execute(
+                "SELECT content FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
+            ).fetchone()
+            idea_rows = connection.execute(
+                "SELECT title, description FROM ideas WHERE session_id = ? ORDER BY updated_at DESC LIMIT 20", (session_id,)
+            ).fetchall()
         history.reverse()
+        summary_context = json.loads(summary_row["content"]) if summary_row else None
+        structured_context = json.dumps([dict(row) for row in idea_rows], ensure_ascii=False) if idea_rows else None
         if prompt == "__HELP__":
             answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/投票整理待决定的问题；/画图生成方案流程；/挑战检查风险；/待办提取下一步。也可以直接 @RoomAI 提问。"
         else:
-            answer = await answer_room_prompt(room["topic"], history, prompt)
+            answer = await answer_room_prompt(
+                room["topic"], history, prompt, model=room["model"], session_id=session_id,
+                summary=json.dumps(summary_context, ensure_ascii=False) if summary_context else None,
+                structured_context=structured_context,
+            )
         if not answer:
             answer = "我暂时没能连上模型，请稍后重试。你也可以先继续讨论，消息会保留在房间里。"
         message = create_message_record(session_id, None, "RoomAI", "agent", answer, now_iso())
@@ -479,6 +702,21 @@ async def update_phase(session_id: str, payload: PhaseRequest) -> dict:
         connection.execute("UPDATE rooms SET phase = ? WHERE session_id = ?", (payload.phase, session_id))
     await manager.broadcast(session_id, {"type": "phase_changed", "phase": payload.phase})
     return {"phase": payload.phase}
+
+
+@app.put("/api/rooms/{session_id}/model")
+async def update_model(session_id: str, payload: ModelRequest) -> dict:
+    visitor = ensure_visitor(session_id, payload.visitor_id)
+    room = ensure_room(session_id)
+    available = list(dict.fromkeys([room["model"], *AVAILABLE_MODELS]))
+    if not visitor["is_owner"] or token_hash(payload.owner_token) != room["owner_token_hash"]:
+        raise HTTPException(status_code=403, detail="只有房主可以切换模型")
+    if payload.model not in available:
+        raise HTTPException(status_code=422, detail="这个模型不在可选列表中")
+    with database() as connection:
+        connection.execute("UPDATE rooms SET model = ? WHERE session_id = ?", (payload.model, session_id))
+    await manager.broadcast(session_id, {"type": "model_changed", "model": payload.model})
+    return {"model": payload.model}
 
 
 @app.websocket("/ws/{session_id}")

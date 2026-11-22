@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 
-import httpx
-
-from ..config import MODEL_API_KEY, MODEL_BASE_URL, MODEL_NAME, MODEL_TIMEOUT_SECONDS
+from ..config import MODEL_API_KEY, MODEL_NAME
+from .agent import complete_chat
 
 
 def fallback_brief(topic: str) -> dict:
@@ -18,14 +17,12 @@ def fallback_brief(topic: str) -> dict:
     }
 
 
-async def create_room_brief(topic: str) -> dict:
+async def create_room_brief(topic: str, session_id: str | None = None, model: str | None = None) -> dict:
     if not MODEL_API_KEY:
         return fallback_brief(topic)
 
-    body = {
-        "model": MODEL_NAME,
-        "temperature": 0.5,
-        "messages": [
+    result = await complete_chat(
+        [
             {
                 "role": "system",
                 "content": (
@@ -35,23 +32,20 @@ async def create_room_brief(topic: str) -> dict:
             },
             {"role": "user", "content": f"讨论主题：{topic}"},
         ],
-        "response_format": {"type": "json_object"},
-    }
+        model=model or MODEL_NAME,
+        session_id=session_id,
+        json_mode=True,
+        temperature=0.5,
+    )
+    if not result:
+        return fallback_brief(topic)
     try:
-        async with httpx.AsyncClient(timeout=MODEL_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{MODEL_BASE_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {MODEL_API_KEY}"},
-                json=body,
-            )
-            response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        result = json.loads(content)
-        opening = str(result.get("opening", "")).strip()
-        questions = result.get("prep_checklist", [])
+        parsed = json.loads(result["content"])
+        opening = str(parsed.get("opening", "")).strip()
+        questions = parsed.get("prep_checklist", [])
         questions = [str(item).strip() for item in questions if str(item).strip()][:5]
         if not opening or len(questions) < 3:
             return fallback_brief(topic)
         return {"opening": opening, "prep_checklist": questions}
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+    except (KeyError, IndexError, TypeError, ValueError):
         return fallback_brief(topic)
