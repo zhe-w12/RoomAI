@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS rooms (
     red_team_count INTEGER NOT NULL DEFAULT 0,
     last_activity_at TEXT,
     cleanup_warning_sent_at TEXT,
+    last_guidance_at TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS visitors (
@@ -241,6 +242,8 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE rooms ADD COLUMN last_activity_at TEXT")
         if "cleanup_warning_sent_at" not in room_columns:
             connection.execute("ALTER TABLE rooms ADD COLUMN cleanup_warning_sent_at TEXT")
+        if "last_guidance_at" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN last_guidance_at TEXT")
         connection.execute("UPDATE rooms SET last_activity_at = created_at WHERE last_activity_at IS NULL")
         idea_columns = {row[1] for row in connection.execute("PRAGMA table_info(ideas)")}
         if "strengths" not in idea_columns:

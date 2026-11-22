@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timezone
 
 from ..database import database
-from ..config import EVALUATION_DIMENSIONS
+from ..config import AUTO_GUIDANCE_COOLDOWN_SECONDS, EVALUATION_DIMENSIONS
 from .agent import complete_chat, history_message
 
 
@@ -70,7 +70,13 @@ def _format_summary(summary: dict, version: int, ideas: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def analyze_room(session_id: str, model: str, *, force: bool = False) -> dict | None:
+async def analyze_room(
+    session_id: str,
+    model: str,
+    *,
+    force: bool = False,
+    auto_guidance: bool = True,
+) -> dict | None:
     with database() as connection:
         room = connection.execute("SELECT * FROM rooms WHERE session_id = ?", (session_id,)).fetchone()
         if not room:
@@ -100,6 +106,10 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             "SELECT id, title, assignee, status, due_at FROM todos WHERE session_id = ? ORDER BY id DESC LIMIT 30",
             (session_id,),
         ).fetchall()
+        existing_decisions = connection.execute(
+            "SELECT title, outcome, created_at FROM decisions WHERE session_id = ? ORDER BY id DESC LIMIT 20",
+            (session_id,),
+        ).fetchall()
         existing_image_summaries = connection.execute(
             """SELECT id AS message_id, sender_name, image_summary, created_at FROM messages
                WHERE session_id = ? AND image_summary <> '' ORDER BY id DESC LIMIT 30""",
@@ -120,6 +130,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "phase": room["phase"],
         "known_ideas": [dict(item) for item in existing_ideas],
         "known_todos": [dict(item) for item in existing_todos],
+        "known_decisions": [dict(item) for item in existing_decisions],
         "known_image_summaries": [dict(item) for item in existing_image_summaries],
         "member_names": members,
         "messages": [
@@ -147,6 +158,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "当房间处于发散阶段，且已有多个清晰候选方向、讨论开始进入比较取舍时，phase_suggestion 可设为 converge；否则为 null。"
         "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称；"
         "如果来源消息的 sender 是‘匿名成员’，proposer_name 必须填写‘匿名成员’，绝不能猜测身份；"
+        "结合 known_decisions 区分已经记录的决策和仍待团队拍板的 decision_points；只有新消息明确推翻或更新时才视为变化。"
         "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务，待办 source_message_id 也必须来自输入消息 id。"
         "对 recent messages 中 has_image=true 的消息，为每张图片写一句客观、简短的 image_summaries 描述；无法辨认时留空。"
         "image_summaries.message_id 必须来自这些带图片的消息 id，不要对同一张图片猜测图片外的信息。"
@@ -273,6 +285,25 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
     created_at = _now()
     saved_ideas: list[dict] = []
     with database() as connection:
+        if auto_guidance and guide_question:
+            if AUTO_GUIDANCE_COOLDOWN_SECONDS:
+                cooldown_cutoff = (
+                    datetime.now(timezone.utc).timestamp() - AUTO_GUIDANCE_COOLDOWN_SECONDS
+                )
+                cutoff_at = datetime.fromtimestamp(cooldown_cutoff, timezone.utc).isoformat()
+                cursor = connection.execute(
+                    """UPDATE rooms SET last_guidance_at = ?
+                       WHERE session_id = ? AND (last_guidance_at IS NULL OR last_guidance_at <= ?)""",
+                    (created_at, session_id, cutoff_at),
+                )
+            else:
+                cursor = connection.execute(
+                    "UPDATE rooms SET last_guidance_at = ? WHERE session_id = ?",
+                    (created_at, session_id),
+                )
+            if cursor.rowcount != 1:
+                guide_question = ""
+                summary_data["guide_question"] = ""
         version = connection.execute(
             "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM summaries WHERE session_id = ?", (session_id,)
         ).fetchone()["version"]

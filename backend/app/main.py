@@ -331,7 +331,12 @@ def pending_user_messages(session_id: str) -> int:
     return int(row["count"])
 
 
-async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> dict | None:
+async def publish_room_analysis(
+    session_id: str,
+    *,
+    auto_vote: bool = True,
+    auto_guidance: bool = True,
+) -> dict | None:
     async with _analysis_locks[session_id]:
         room = ensure_room(session_id)
         if room["closed_at"]:
@@ -344,6 +349,7 @@ async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> d
             model=room["model"],
             phase=room["phase"],
             mode="analysis",
+            auto_guidance=auto_guidance,
         )
         if not isinstance(result, dict) or not result:
             message = create_message_record(
@@ -499,6 +505,82 @@ def get_room_todos(session_id: str) -> list[dict]:
             (session_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def retrieve_relevant_messages(session_id: str, prompt: str, exclude_ids: set[int] | None = None) -> list[dict]:
+    stop_phrases = (
+        "我们", "之前", "刚才", "这个", "那个", "哪些", "什么", "怎么", "为何", "为什么", "可以", "一下", "相关",
+        "讨论", "提到", "说过", "还有", "以及", "是不是", "有没有", "能否", "如何", "目前", "现在", "比较",
+        "帮我", "给我", "请问", "请帮", "具体", "一下子",
+    )
+    stop_characters = set("的了是在有和与及或吗呢吧呀啊我你他她它")
+    term_weights: dict[str, int] = {}
+
+    def add_term(term: str, weight: int) -> None:
+        if len(term) < 2 or term in {"roomai", "assistant"}:
+            return
+        if term[0] in stop_characters or term[-1] in stop_characters:
+            return
+        term_weights[term] = max(weight, term_weights.get(term, 0))
+
+    for run in re.findall(r"[\u4e00-\u9fff]+", prompt):
+        filtered = run
+        for phrase in stop_phrases:
+            filtered = filtered.replace(phrase, " ")
+        for segment in re.findall(r"[\u4e00-\u9fff]{2,}", filtered):
+            if len(segment) <= 10:
+                add_term(segment, len(segment) * 2)
+            for width in range(min(4, len(segment)), 1, -1):
+                for index in range(len(segment) - width + 1):
+                    add_term(segment[index:index + width], width)
+    for term in re.findall(r"[A-Za-z0-9-]{2,}", prompt.casefold()):
+        if term not in {"roomai", "assistant", "the", "and", "for", "with", "from"}:
+            add_term(term, len(term) + 2)
+    terms = [term for term, _ in sorted(term_weights.items(), key=lambda item: item[1], reverse=True)[:48]]
+    if not terms:
+        return []
+
+    excluded = sorted(exclude_ids or set())
+    conditions = " OR ".join("content LIKE ? OR image_summary LIKE ?" for _ in terms)
+    score_expressions = " + ".join(
+        "CASE WHEN content LIKE ? OR image_summary LIKE ? THEN ? ELSE 0 END" for _ in terms
+    )
+    parameters: list[object] = []
+    for term in terms:
+        pattern = f"%{term}%"
+        parameters.extend((pattern, pattern, term_weights[term]))
+    parameters.append(session_id)
+    for term in terms:
+        pattern = f"%{term}%"
+        parameters.extend((pattern, pattern))
+    exclude_clause = ""
+    if excluded:
+        exclude_clause = f" AND id NOT IN ({','.join('?' for _ in excluded)})"
+        parameters.extend(excluded)
+    with database() as connection:
+        rows = connection.execute(
+            f"""SELECT id, sender_name, content, image_summary, created_at,
+                       ({score_expressions}) AS match_score
+                FROM messages
+                WHERE session_id = ? AND is_recalled = 0 AND ({conditions}){exclude_clause}
+                ORDER BY match_score DESC, id DESC LIMIT 120""",
+            parameters,
+        ).fetchall()
+    ranked = []
+    for row in rows:
+        content = str(row["content"] or "")
+        image_summary = str(row["image_summary"] or "")
+        if row["match_score"]:
+            ranked.append({
+                "message_id": int(row["id"]),
+                "sender": row["sender_name"],
+                "excerpt": (content or image_summary)[:600],
+                "image_summary": image_summary[:400],
+                "created_at": row["created_at"],
+                "match_count": int(row["match_score"]),
+            })
+    ranked.sort(key=lambda item: (item["match_count"], item["message_id"]), reverse=True)
+    return ranked[:8]
 
 
 def attach_todos_to_message(session_id: str, message_id: int, todo_ids: list[int]) -> list[int]:
@@ -1529,7 +1611,7 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
             research_query=detail,
         ))
     elif is_summary_request:
-        asyncio.create_task(publish_room_analysis(session_id, auto_vote=False))
+        asyncio.create_task(publish_room_analysis(session_id, auto_vote=False, auto_guidance=False))
     elif content.startswith("/对比"):
         asyncio.create_task(publish_idea_comparison(session_id))
     elif prompt:
@@ -1653,16 +1735,29 @@ async def generate_agent_reply(
             idea_rows = connection.execute(
                 "SELECT title, description, proposer_name FROM ideas WHERE session_id = ? ORDER BY updated_at DESC LIMIT 20", (session_id,)
             ).fetchall()
+            todo_rows = connection.execute(
+                "SELECT id, title, assignee, status, due_at FROM todos WHERE session_id = ? ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, updated_at DESC LIMIT 30",
+                (session_id,),
+            ).fetchall()
+            decision_rows = connection.execute(
+                "SELECT title, outcome, created_at FROM decisions WHERE session_id = ? ORDER BY id DESC LIMIT 20",
+                (session_id,),
+            ).fetchall()
             member_names = [row["nickname"] for row in connection.execute(
                 "SELECT nickname FROM visitors WHERE session_id = ? ORDER BY rowid", (session_id,)
             ).fetchall()]
         history.reverse()
+        recent_ids = {int(item["id"]) for item in history}
+        relevant_past_messages = retrieve_relevant_messages(session_id, prompt, recent_ids)
         summary_context = json.loads(summary_row["content"]) if summary_row else None
         context_data = {
             "ideas": [dict(row) for row in idea_rows],
+            "todos": [dict(row) for row in todo_rows],
+            "decisions": [dict(row) for row in decision_rows],
             "older_image_summaries": image_summaries,
+            "relevant_past_messages": relevant_past_messages,
         }
-        structured_context = json.dumps(context_data, ensure_ascii=False) if idea_rows or image_summaries else None
+        structured_context = json.dumps(context_data, ensure_ascii=False) if any((idea_rows, todo_rows, decision_rows, image_summaries, relevant_past_messages)) else None
         answer = None
         if prompt == "__HELP__":
             answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/联网评估 结合外部资料核对方向；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/用户视角 模拟目标用户的需求和顾虑；/待办提取下一步。发散阶段也可以点输入区的眼睛图标匿名提想法。也可以直接 @RoomAI 提问；房间资料会按问题自动检索。"

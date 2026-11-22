@@ -5,7 +5,7 @@
 > 二十五项功能。本次整理版（2026-11-23）把全部决策重排为可直接开工的规格，
 > 新增「场景全覆盖」与「前端 UI 设计（参考 Muse 聊天界面）」两节，并对 13 个
 > 待定功能给出建议优先级。
-> 状态：整理版草稿，待定决策已处理（20 条兜底触发已定：要；部署暂缓：先不搞），确认后即可开工 M1。
+> 状态：M1–M9 已按本设计完成首轮实现；本文件继续作为功能验收与维护依据。部署暂缓。
 
 ## 1. 项目概述
 
@@ -317,7 +317,7 @@ Mermaid 图表（方案可视化）。
 
 | 表 | 关键字段 | 说明 |
 |---|---|---|
-| rooms | session_id（PK）、topic、invite_code（6 位数字，唯一）、owner_token_hash、phase（发散/收敛，默认发散）、model（默认 DeepSeek）、prep_checklist（JSON，3–5 条准备问题）、created_at | session_id 即房间 ID；owner_token 只存哈希，不存明文 |
+| rooms | session_id（PK）、topic、invite_code（6 位数字，唯一）、owner_token_hash、phase（发散/收敛，默认发散）、model（默认 DeepSeek）、prep_checklist（JSON，3–5 条准备问题）、last_guidance_at、created_at | session_id 即房间 ID；owner_token 只存哈希，不存明文；last_guidance_at 用于限制自动引导频率 |
 | visitors | visitor_id（PK）、session_id、nickname、is_owner、last_seen | 访客身份只存在浏览器 localStorage，换浏览器要重填昵称 |
 | messages | id、session_id、visitor_id、sender_name、sender_type（user/agent）、content、reply_to_message_id（可空，引用回复）、is_recalled、recalled_at、created_at | 全量存库，是 Agent 的输入和追溯依据 |
 | mentions | id、message_id、session_id、mentioned_visitor_id、is_read、created_at | @提醒记录；点开或查看后标已读 |
@@ -567,4 +567,4 @@ M9 验收标准：匿名想法的公开记录不含 visitor_id；`/用户视角`
 | 每 20 条新消息的兜底触发要不要 | 要。默认开启，可配置关闭 |
 | 部署目标：与库解同服还是另起一台 | 暂缓，先不搞；等 MVP 跑起来再定 |
 
-下一步就是 M1 搭骨架（FastAPI + WebSocket 聊天室 + React 前端）。
+M1–M9 已按本设计完成首轮实现；后续按本文件持续验收与维护，部署仍暂缓。

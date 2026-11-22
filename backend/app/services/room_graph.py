@@ -47,6 +47,7 @@ class RoomAgentRequest:
     external_sources: list[dict]
     mode: AgentMode
     force_analysis: bool
+    auto_guidance: bool
     on_delta: Callable[[str], Awaitable[None] | None] | None
     output: str | dict[str, Any] | None = None
 
@@ -122,7 +123,12 @@ def _checkpoint_turns(state: RoomAgentState, request: RoomAgentRequest, response
 
 async def _analysis_node(state: RoomAgentState) -> dict:
     request = _current_request()
-    result = await analyze_room(request.session_id, request.model, force=request.force_analysis)
+    result = await analyze_room(
+        request.session_id,
+        request.model,
+        force=request.force_analysis,
+        auto_guidance=request.auto_guidance,
+    )
     request.output = result
     if not result:
         return {"last_route": "analysis"}
@@ -197,6 +203,7 @@ async def run_room_agent(
     external_sources: list[dict] | None = None,
     mode: AgentMode = "conversation",
     force_analysis: bool = False,
+    auto_guidance: bool = True,
     on_delta: Callable[[str], Awaitable[None] | None] | None = None,
 ) -> str | dict[str, Any] | None:
     if _graph is None:
@@ -214,6 +221,7 @@ async def run_room_agent(
         external_sources=external_sources or [],
         mode=mode,
         force_analysis=force_analysis,
+        auto_guidance=auto_guidance,
         on_delta=on_delta,
     )
     context_token = _request_context.set(request)
