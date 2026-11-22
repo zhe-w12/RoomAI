@@ -2,6 +2,7 @@ import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useS
 import { useParams } from "react-router-dom";
 import { Activity, AtSign, ArrowDown, ArrowRight, Check, ChevronDown, CircleHelp, Clipboard, ClipboardCheck, Command, FileImage, ImagePlus, Lightbulb, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Search, Send, Sparkles, Users, X } from "lucide-react";
 import { api, Identity, loadIdentity, Member, Message, Room, saveIdentity } from "../lib/api";
+import MarkdownContent from "../components/MarkdownContent";
 
 const commands = ["/总结", "/评估", "/投票", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
 
@@ -357,7 +358,9 @@ export default function RoomPage() {
                 <div className={`message-bubble ${own ? "bubble-own" : ""} ${message.sender_type === "agent" ? "bubble-agent" : ""} ${message.is_recalled ? "bubble-recalled" : ""}`}>
                   {message.reply_to && <button className="quoted-message" onClick={() => jumpToMessage(message.reply_to!.id)}><span className="quote-bar" /><span><b>{message.reply_to.sender_name}</b><small>{message.reply_to.content}</small></span></button>}
                   {message.is_recalled ? <span className="recalled-copy">这条消息已撤回</span> : <>
-                    {message.content && <p className="message-content">{message.content.split(/(@[\w\u4e00-\u9fff-]+)/g).map((part, partIndex) => part.startsWith("@") ? <mark className="mention-mark" key={partIndex}>{part}</mark> : part)}</p>}
+                    {message.content && (message.sender_type === "agent"
+                      ? <MarkdownContent content={message.content} />
+                      : <p className="message-content">{message.content.split(/(@[\w\u4e00-\u9fff-]+)/g).map((part, partIndex) => part.startsWith("@") ? <mark className="mention-mark" key={partIndex}>{part}</mark> : part)}</p>)}
                     {message.image_url && <button className="message-image" onClick={() => window.open(api.imageUrl(message.image_url!), "_blank", "noopener,noreferrer")}><img src={api.imageUrl(message.image_url)} alt="讨论附件" /><span><FileImage size={14} /> 查看图片</span></button>}
                   </>}
                   {!message.is_recalled && <div className="message-tools"><button onClick={() => { setReplyTo(message); composerRef.current?.focus(); }} title="引用回复"><MessageCircle size={13} /> 回复</button>{own && Date.now() - new Date(message.created_at).getTime() <= 120000 && <button onClick={() => void recall(message)} title="两分钟内可以撤回">撤回</button>}</div>}
