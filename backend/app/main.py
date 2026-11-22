@@ -40,11 +40,10 @@ from .config import (
 from .database import database, initialize_database
 from .realtime import manager, visitor_for_session
 from .services.brief import ROOM_TEMPLATES, create_room_brief
-from .services.agent import COMMAND_PROMPTS, answer_room_prompt
-from .services.analysis import analyze_room
+from .services.agent import COMMAND_PROMPTS
 from .services.report import generate_room_report, markdown_to_docx
-from .services.voting import propose_vote
 from .services.web_search import SearchNotConfigured, SearchUnavailable, search_web
+from .services.room_graph import delete_room_agent_checkpoint, run_room_agent, start_room_agent_graph, stop_room_agent_graph
 from .services.documents import (
     MAX_DOCUMENT_BYTES,
     MAX_DOCUMENT_CHARS,
@@ -321,8 +320,16 @@ async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> d
         room = ensure_room(session_id)
         if room["closed_at"]:
             return None
-        result = await analyze_room(session_id, room["model"])
-        if not result:
+        result = await run_room_agent(
+            session_id=session_id,
+            topic=room["topic"],
+            history=[],
+            prompt="增量分析当前讨论，更新总结、想法评估和下一步。",
+            model=room["model"],
+            phase=room["phase"],
+            mode="analysis",
+        )
+        if not isinstance(result, dict) or not result:
             message = create_message_record(
                 session_id, None, "RoomAI", "agent", "AI 暂时没反应，请稍后再试。讨论消息已经保留。", now_iso()
             )
@@ -348,6 +355,14 @@ async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> d
 async def publish_red_team(session_id: str, detail: str = "", *, automatic: bool = False) -> None:
     reserved = False
     generated = False
+    stream_id = uuid.uuid4().hex
+    stream_started = False
+
+    async def broadcast_delta(content: str) -> None:
+        await manager.broadcast(
+            session_id,
+            {"type": "ai_stream", "stream_id": stream_id, "phase": "delta", "content": content},
+        )
     if automatic:
         with database() as connection:
             cursor = connection.execute(
@@ -395,19 +410,35 @@ async def publish_red_team(session_id: str, detail: str = "", *, automatic: bool
             "说明相关想法标题，不要编造事实或直接否定方案。"
         )
         summary = json.loads(summary_row["content"]) if summary_row else None
-        answer = await answer_room_prompt(
-            room["topic"], history, prompt, model=room["model"], session_id=session_id,
-            phase=room["phase"], summary=json.dumps(summary, ensure_ascii=False) if summary else None,
+        stream_started = True
+        await manager.broadcast(
+            session_id,
+            {"type": "ai_stream", "stream_id": stream_id, "phase": "start"},
+        )
+        answer = await run_room_agent(
+            session_id=session_id,
+            topic=room["topic"],
+            history=history,
+            prompt=prompt,
+            model=room["model"],
+            phase=room["phase"],
+            summary=json.dumps(summary, ensure_ascii=False) if summary else None,
             structured_context=json.dumps(idea_rows, ensure_ascii=False) if idea_rows else None,
+            on_delta=broadcast_delta,
         )
         if not answer:
             raise RuntimeError("红队审查生成失败")
         message = create_message_record(session_id, None, "RoomAI", "agent", f"**红队质疑**\n\n{answer}", now_iso())
-        await manager.broadcast(session_id, {"type": "message", "message": message})
+        await manager.broadcast(session_id, {"type": "message", "message": message, "stream_id": stream_id})
         generated = True
     except Exception:
         return
     finally:
+        if stream_started:
+            await manager.broadcast(
+                session_id,
+                {"type": "ai_stream", "stream_id": stream_id, "phase": "end"},
+            )
         if reserved and not generated:
             with database() as connection:
                 connection.execute("UPDATE rooms SET red_team_count = MAX(0, red_team_count - 1) WHERE session_id = ?", (session_id,))
@@ -571,8 +602,16 @@ async def create_ai_vote(session_id: str, detail: str = "") -> None:
             history = [dict(row) for row in reversed(rows)]
             if summary:
                 history.insert(0, {"sender_name": "RoomAI 总结", "content": summary["content"]})
-            result = await propose_vote(room["topic"], history, model=room["model"], session_id=session_id, detail=detail)
-            if result:
+            result = await run_room_agent(
+                session_id=session_id,
+                topic=room["topic"],
+                history=history,
+                prompt=detail,
+                model=room["model"],
+                phase=room["phase"],
+                mode="vote",
+            )
+            if isinstance(result, dict) and result.get("question") and result.get("options"):
                 await publish_vote(session_id, "", result["question"], result["options"])
             else:
                 message = create_message_record(session_id, None, "RoomAI", "agent", "我还没找到足够清晰的投票选项。请先把需要决定的问题和各方方案说具体一些。", now_iso())
@@ -681,6 +720,10 @@ async def cleanup_inactive_rooms() -> None:
             )
         if not cursor.rowcount:
             continue
+        try:
+            await delete_room_agent_checkpoint(session_id)
+        except Exception:
+            logger.exception("Could not delete RoomAI checkpoint for an expired room")
         await manager.broadcast(session_id, {"type": "room_deleted", "reason": "inactive"})
         idle_task = _idle_tasks.pop(session_id, None)
         if idle_task and not idle_task.done():
@@ -714,6 +757,7 @@ async def room_cleanup_loop() -> None:
 async def startup() -> None:
     global _cleanup_task
     initialize_database()
+    await start_room_agent_graph()
     with database() as connection:
         open_votes = connection.execute(
             "SELECT id, session_id, closes_at FROM votes WHERE status = 'open' AND closes_at IS NOT NULL"
@@ -733,6 +777,7 @@ async def shutdown() -> None:
             await _cleanup_task
         except asyncio.CancelledError:
             pass
+    await stop_room_agent_graph()
 
 
 @app.get("/api/health")
@@ -924,6 +969,11 @@ async def delete_room(session_id: str, payload: RoomDeleteRequest) -> dict:
         cursor = connection.execute("DELETE FROM rooms WHERE session_id = ?", (session_id,))
     if not cursor.rowcount:
         raise HTTPException(status_code=404, detail="找不到这个房间")
+
+    try:
+        await delete_room_agent_checkpoint(session_id)
+    except Exception:
+        logger.exception("Could not delete RoomAI checkpoint for a deleted room")
 
     await manager.broadcast(session_id, {"type": "room_deleted", "reason": "manual"})
     idle_task = _idle_tasks.pop(session_id, None)
@@ -1429,6 +1479,15 @@ async def generate_agent_reply(
     *,
     research_query: str | None = None,
 ) -> None:
+    stream_id = uuid.uuid4().hex
+    stream_started = False
+
+    async def broadcast_delta(content: str) -> None:
+        await manager.broadcast(
+            session_id,
+            {"type": "ai_stream", "stream_id": stream_id, "phase": "delta", "content": content},
+        )
+
     await manager.broadcast(
         session_id,
         {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": True},
@@ -1489,13 +1548,24 @@ async def generate_agent_reply(
                 elif not web_sources:
                     prompt += f"\n{search_notice or '没有检索到外部网页来源，请仅使用下方房间资料。'}"
             if answer is None:
-                answer = await answer_room_prompt(
-                    room["topic"], history, prompt, model=room["model"], session_id=session_id,
+                stream_started = True
+                await manager.broadcast(
+                    session_id,
+                    {"type": "ai_stream", "stream_id": stream_id, "phase": "start"},
+                )
+                answer = await run_room_agent(
+                    session_id=session_id,
+                    topic=room["topic"],
+                    history=history,
+                    prompt=prompt,
+                    model=room["model"],
                     phase=room["phase"],
                     summary=json.dumps(summary_context, ensure_ascii=False) if summary_context else None,
                     structured_context=structured_context,
                     member_names=member_names,
                     external_sources=references,
+                    mode="research" if research_query is not None else "conversation",
+                    on_delta=broadcast_delta,
                 )
                 if answer and references:
                     source_lines = []
@@ -1519,10 +1589,15 @@ async def generate_agent_reply(
         if not answer:
             answer = "我暂时没能连上模型，请稍后重试。你也可以先继续讨论，消息会保留在房间里。"
         message = create_message_record(session_id, None, "RoomAI", "agent", answer, now_iso())
-        await manager.broadcast(session_id, {"type": "message", "message": message})
+        await manager.broadcast(session_id, {"type": "message", "message": message, "stream_id": stream_id})
     except Exception:
         return
     finally:
+        if stream_started:
+            await manager.broadcast(
+                session_id,
+                {"type": "ai_stream", "stream_id": stream_id, "phase": "end"},
+            )
         await manager.broadcast(
             session_id,
             {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": False},
@@ -1741,8 +1816,17 @@ async def review_finish(session_id: str, payload: FinishReviewRequest) -> dict:
     if room["closed_at"]:
         raise HTTPException(status_code=409, detail="讨论已经结束")
     async with _analysis_locks[session_id]:
-        result = await analyze_room(session_id, room["model"], force=True)
-    if result:
+        result = await run_room_agent(
+            session_id=session_id,
+            topic=room["topic"],
+            history=[],
+            prompt="房主正在结束讨论前检查评估维度。请强制完成一次最后的增量分析。",
+            model=room["model"],
+            phase=room["phase"],
+            mode="analysis",
+            force_analysis=True,
+        )
+    if isinstance(result, dict) and result:
         await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
         await manager.broadcast(session_id, {"type": "idea_update", "ideas": get_ideas_for_event(session_id)})
         await manager.broadcast(session_id, {"type": "todo_update", "todos": get_room_todos(session_id)})

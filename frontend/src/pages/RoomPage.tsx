@@ -62,6 +62,7 @@ export default function RoomPage() {
   const [roomError, setRoomError] = useState("");
   const [onlineIds, setOnlineIds] = useState<string[]>([]);
   const [typingNames, setTypingNames] = useState<string[]>([]);
+  const [streamingMessages, setStreamingMessages] = useState<{ stream_id: string; content: string; created_at: string }[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [newMessages, setNewMessages] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -173,6 +174,7 @@ export default function RoomPage() {
       setDraftHydrated(false);
       setLoading(true);
       setRoomError("");
+      setStreamingMessages([]);
       const storedIdentity = loadIdentity(sessionId);
       if (!storedIdentity) {
         if (!canceled) {
@@ -303,6 +305,9 @@ export default function RoomPage() {
           const data = JSON.parse(event.data);
           if (data.type === "message" || data.type === "message_recalled") {
             applyMessage(data.message as Message);
+            if (typeof data.stream_id === "string") {
+              setStreamingMessages((current) => current.filter((item) => item.stream_id !== data.stream_id));
+            }
             if (!nearBottomRef.current) setNewMessages(true);
             const incoming = data.message as Message;
             if (data.type === "message" && incoming.visitor_id !== visitorId && incoming.content.includes(`@${nickname}`)) {
@@ -310,6 +315,15 @@ export default function RoomPage() {
             }
             if (data.type === "message" && incoming.sender_type === "agent") {
               void api.getUsage(sessionId, visitorId).then(setUsage).catch(() => undefined);
+            }
+          }
+          if (data.type === "ai_stream" && typeof data.stream_id === "string") {
+            if (data.phase === "start") {
+              setStreamingMessages((current) => [...current, { stream_id: data.stream_id, content: "", created_at: new Date().toISOString() }]);
+            } else if (data.phase === "delta" && typeof data.content === "string") {
+              setStreamingMessages((current) => current.map((item) => item.stream_id === data.stream_id ? { ...item, content: item.content + data.content } : item));
+            } else if (data.phase === "end") {
+              setStreamingMessages((current) => current.filter((item) => item.stream_id !== data.stream_id));
             }
           }
           if (data.type === "presence") setOnlineIds((data.members as Member[]).map((member) => member.visitor_id));
@@ -351,6 +365,7 @@ export default function RoomPage() {
         if (activeSocket !== socket) return;
         activeSocket = null;
         if (socketRef.current === socket) socketRef.current = null;
+        setStreamingMessages([]);
         if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
         if (disposed) return;
         if (event.code === 4403) {
@@ -401,6 +416,12 @@ export default function RoomPage() {
       setNewMessages(false);
     }
   }, [messages, nearBottom]);
+
+  useEffect(() => {
+    if (!nearBottom || !streamingMessages.length) return;
+    const frame = window.requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [nearBottom, streamingMessages]);
 
   useEffect(() => {
     if (!selectedImage) { setImagePreview(""); return; }
@@ -1025,6 +1046,12 @@ export default function RoomPage() {
               </div>
             </article>;
           })}
+          {streamingMessages.filter((item) => item.content).map((item) => <article className="msg msg-agent-streaming" key={item.stream_id}>
+            <div className="avatar msg-avatar avatar-ai"><Sparkles size={13} /></div>
+            <div className="msg-main"><div className="msg-meta"><b className="agent-name">RoomAI</b><i className="tag-ai">AI</i><time>{formatTime(item.created_at)}</time></div>
+              <div className="msg-body"><MarkdownContent content={item.content} /><i className="stream-cursor" aria-hidden="true" /></div>
+            </div>
+          </article>)}
           {typingNames.length > 0 && <div className="typing"><span className="typing-dots"><i /><i /><i /></span>{typingNames.join("、")} 正在输入…</div>}
           <div ref={bottomRef} />
         </div>

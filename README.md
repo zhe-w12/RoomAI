@@ -2,13 +2,13 @@
 
 RoomAI 是一个面向小团队的立项讨论聊天室。伙伴通过邀请链接或 6 位邀请码进入房间，围绕一个主题实时讨论；RoomAI 可以生成讨论开场、准备问题，并在成员召唤时梳理讨论内容。
 
-项目按 [DESIGN.md](./DESIGN.md) 推进，M1–M7 功能已实现。技术栈为 FastAPI + WebSocket、SQLite、React + Vite + TypeScript + Tailwind；界面优先适配手机，采用白底灰阶与细线布局。部署不在当前阶段范围内。
+项目按 [DESIGN.md](./DESIGN.md) 推进。技术栈为 FastAPI + WebSocket、LangGraph + SQLite checkpoint、React + Vite + TypeScript + Tailwind；界面优先适配手机，采用白底灰阶与细线布局。部署不在当前阶段范围内。
 
 ## 本地运行
 
 ### 1. 配置模型
 
-复制 `.env.example` 为项目根目录下的 `.env`，填入兼容 OpenAI Chat Completions 接口的密钥。默认配置使用 `https://aiping.cn/api/v1` 和 `GLM-5.3-Flash`。需要联网评估时，还要设置 Tavily 的 `TAVILY_API_KEY`；评估维度可通过 `EVALUATION_DIMENSIONS` JSON 数组调整。`.env` 只保存在本地，不要提交到 Git。
+复制 `.env.example` 为项目根目录下的 `.env`，填入兼容 OpenAI Chat Completions 接口的密钥。默认配置使用 `https://aiping.cn/api/v1` 和 `GLM-5.3-Flash`。需要联网评估时，还要设置 Tavily 的 `TAVILY_API_KEY`；评估维度可通过 `EVALUATION_DIMENSIONS` JSON 数组调整，LangGraph checkpoint 路径可通过 `LANGGRAPH_CHECKPOINT_PATH` 调整。`.env` 只保存在本地，不要提交到 Git。
 
 ### 2. 启动后端
 
@@ -39,6 +39,7 @@ npm run dev
 - 创建房间、生成 6 位邀请码、通过邀请码或链接加入；昵称在房间内唯一。
 - 创建房间时可选择自由讨论、技术选型、产品立项或活动策划模板，也可设置可选房间密码；加入链接和邀请码均会校验已设置的密码。
 - SQLite 持久化消息和访客；WebSocket 广播消息、在线成员、输入状态和阶段变化，断线后指数退避重连最多 5 次，并按最后消息 ID 补齐漏掉的消息。
+- `@RoomAI` 对话与红队回复通过 WebSocket 流式显示；LangGraph Supervisor 按房间路由普通对话、联网评估、滚动总结分析和投票提案，使用 `session_id` 作为 `thread_id`，checkpoint 保留最近四轮 Agent 上下文。
 - 输入草稿按房间和成员保存在浏览器 `localStorage`，刷新后恢复，发送后清除。
 - 房主可在设置里永久删除房间，级联清除讨论数据并删除房间上传的图片和资料文件。
 - 图片附件（JPG / PNG / WebP / GIF，单张不超过 5MB）、引用回复、两分钟内撤回。

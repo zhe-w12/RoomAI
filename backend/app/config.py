@@ -17,6 +17,7 @@ def _path_from_env(name: str, default: str) -> Path:
 
 
 DATABASE_PATH = _path_from_env("DATABASE_PATH", "backend/data/roomai.sqlite3")
+LANGGRAPH_CHECKPOINT_PATH = _path_from_env("LANGGRAPH_CHECKPOINT_PATH", "backend/data/roomai-checkpoints.sqlite3")
 UPLOAD_DIR = _path_from_env("UPLOAD_DIR", "backend/uploads")
 DOCUMENT_DIR = _path_from_env("DOCUMENT_DIR", "backend/documents")
 MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "https://aiping.cn/api/v1").rstrip("/")

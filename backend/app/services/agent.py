@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import json
 import mimetypes
 import math
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -52,6 +54,7 @@ async def complete_chat(
     session_id: str | None = None,
     json_mode: bool = False,
     temperature: float = 0.45,
+    on_delta: Callable[[str], Awaitable[None] | None] | None = None,
 ) -> dict | None:
     """Call the configured OpenAI-compatible endpoint, retry once, and record usage."""
     if not MODEL_API_KEY:
@@ -60,16 +63,53 @@ async def complete_chat(
     body = {"model": selected_model, "temperature": temperature, "messages": messages}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
+    if on_delta:
+        body["stream"] = True
+    sent_delta = False
     for attempt in range(2):
         try:
             async with httpx.AsyncClient(timeout=MODEL_TIMEOUT_SECONDS) as client:
-                response = await client.post(
-                    f"{MODEL_BASE_URL}/chat/completions",
-                    headers={"Authorization": f"Bearer {MODEL_API_KEY}"},
-                    json=body,
-                )
-                response.raise_for_status()
-            payload = response.json()
+                headers = {"Authorization": f"Bearer {MODEL_API_KEY}"}
+                if on_delta:
+                    chunks: list[str] = []
+                    stream_usage = None
+                    async with client.stream(
+                        "POST", f"{MODEL_BASE_URL}/chat/completions", headers=headers, json=body
+                    ) as response:
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if not data:
+                                continue
+                            if data == "[DONE]":
+                                break
+                            event = json.loads(data)
+                            if event.get("usage"):
+                                stream_usage = event["usage"]
+                            for choice in event.get("choices") or []:
+                                delta = (choice.get("delta") or {}).get("content")
+                                if not isinstance(delta, str) or not delta:
+                                    continue
+                                chunks.append(delta)
+                                sent_delta = True
+                                callback_result = on_delta(delta)
+                                if inspect.isawaitable(callback_result):
+                                    await callback_result
+                    content = "".join(chunks)
+                    payload = {
+                        "choices": [{"message": {"content": content}}],
+                        "usage": stream_usage or {},
+                    }
+                else:
+                    response = await client.post(
+                        f"{MODEL_BASE_URL}/chat/completions",
+                        headers=headers,
+                        json=body,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
             content = payload["choices"][0]["message"]["content"]
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("empty model response")
@@ -86,7 +126,7 @@ async def complete_chat(
                     )
             return {"content": content.strip(), "usage": usage, "model": selected_model}
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
-            if attempt == 1:
+            if attempt == 1 or sent_delta:
                 return None
     return None
 
@@ -125,6 +165,7 @@ async def answer_room_prompt(
     structured_context: str | None = None,
     member_names: list[str] | None = None,
     external_sources: list[dict] | None = None,
+    on_delta: Callable[[str], Awaitable[None] | None] | None = None,
 ) -> str | None:
     system = (
         "你是 RoomAI，一个帮助团队讨论立项想法的中文协作助手。紧扣房间主题和已有对话，"
@@ -161,5 +202,5 @@ async def answer_room_prompt(
             + json.dumps(external_sources, ensure_ascii=False),
         })
     messages.append({"role": "user", "content": prompt})
-    result = await complete_chat(messages, model=model, session_id=session_id)
+    result = await complete_chat(messages, model=model, session_id=session_id, on_delta=on_delta)
     return result["content"] if result else None
