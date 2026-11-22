@@ -1,5 +1,5 @@
 import { FormEvent, useState } from "react";
-import { ArrowDownRight, ArrowRight, ArrowUpRight, Check, ChevronRight, CircleHelp, Command, Lightbulb, MessageCircle, Plus, Sparkles, Users, X } from "lucide-react";
+import { ArrowDownRight, ArrowRight, ArrowUpRight, Check, ChevronRight, CircleHelp, Command, Lightbulb, MessageCircle, Plus, Send, Sparkles, Users, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { api, saveIdentity } from "../lib/api";
 
@@ -58,19 +58,21 @@ export default function LandingPage() {
           <div className="trust-row"><span className="avatar-stack"><i>林</i><i>周</i><i>陈</i></span><span>无需注册 · 一个链接就能开始</span></div>
         </div>
 
-        <div className="hero-art" aria-label="RoomAI 讨论示意">
-          <div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" />
-          <div className="art-card art-card-main">
-            <div className="art-card-top"><span className="art-room-icon"><MessageCircle size={15} /></span><span>团队讨论室</span><span className="art-live"><i /> 实时</span></div>
-            <div className="art-topic">校园二手物品<br />怎么流转起来？</div>
-            <div className="art-divider" />
-            <div className="art-message"><span className="mini-avatar mini-lin">林</span><p>可以先从毕业季的闲置开始，需求最集中。</p></div>
-            <div className="art-message art-message-ai"><span className="mini-ai"><Sparkles size={13} /></span><p>这个切入点很清楚。大家觉得先做校内小程序还是社群？</p></div>
-            <div className="art-thinking"><span /><span /><span /> RoomAI 正在跟进</div>
+        <div className="hero-mock" aria-label="RoomAI 讨论示意">
+          <div className="mock-window">
+            <div className="mock-topbar">
+              <span className="mock-dots"><i /><i /><i /></span>
+              <span className="mock-title"><MessageCircle size={13} /> 校园二手物品怎么流转起来？</span>
+              <span className="mock-online"><span className="avatar-stack"><i>林</i><i>周</i><i>陈</i></span> 3 人在线</span>
+            </div>
+            <div className="mock-body">
+              <div className="mock-msg"><span className="mini-avatar">林</span><div><b>林</b><p>可以先从毕业季的闲置开始，需求最集中。</p></div></div>
+              <div className="mock-msg"><span className="mini-avatar mini-blue">周</span><div><b>周</b><p>同意，毕业季大家都有东西要出，验证成本也低。</p></div></div>
+              <div className="mock-msg mock-msg-ai"><span className="mini-ai"><Sparkles size={12} /></span><div><b>RoomAI <i className="ai-label">AI 助手</i></b><p>这个切入点很清楚：需求集中、验证成本低。我给它打了 4.6 分。大家觉得先做校内小程序还是社群？</p></div></div>
+              <div className="mock-idea"><span className="mock-idea-icon"><Lightbulb size={14} /></span><div><b>一个新想法</b><small>宿舍楼下设置交换架</small></div><span className="idea-score">4.6</span></div>
+            </div>
+            <div className="mock-composer"><span>说说你的想法…</span><span className="mock-send"><Send size={13} /></span></div>
           </div>
-          <div className="art-float art-float-idea"><span><Lightbulb size={15} /></span><div><b>一个新想法</b><small>宿舍楼下设置交换架</small></div><span className="idea-score">4.6</span></div>
-          <div className="art-float art-float-people"><span className="tiny-person">林</span><span className="tiny-person person-blue">周</span><span className="tiny-person person-lilac">陈</span><b>3 人正在讨论</b></div>
-          <div className="art-scribble">ideas → action</div>
         </div>
       </section>
 
