@@ -124,6 +124,14 @@ class VoteCloseRequest(BaseModel):
     owner_token: str = Field(min_length=1)
 
 
+class TodoUpdateRequest(BaseModel):
+    visitor_id: str
+    title: str = Field(min_length=1, max_length=300)
+    assignee: str = Field(default="", max_length=80)
+    status: str = Field(default="open", pattern="^(open|done|dropped)$")
+    due_at: str | None = Field(default=None, max_length=10)
+
+
 class ReadMentionsRequest(BaseModel):
     visitor_id: str
     message_ids: list[int] | None = None
@@ -229,6 +237,7 @@ async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> d
         await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
         ideas = get_ideas_for_event(session_id)
         await manager.broadcast(session_id, {"type": "idea_update", "ideas": ideas})
+        await manager.broadcast(session_id, {"type": "todo_update", "todos": get_room_todos(session_id)})
         disagreements = result["summary"].get("disagreements", [])
         if auto_vote and disagreements:
             detail = "讨论分析识别到以下分歧，请围绕这些真实观点拟定中立投票：\n" + "\n".join(
@@ -255,6 +264,15 @@ def get_ideas_for_event(session_id: str) -> list[dict]:
         item["average_score"] = round(sum(scores) / len(scores), 1) if scores else None
         ideas.append(item)
     return ideas
+
+
+def get_room_todos(session_id: str) -> list[dict]:
+    with database() as connection:
+        rows = connection.execute(
+            "SELECT id, session_id, title, assignee, status, due_at, source_message_id, created_at, updated_at FROM todos WHERE session_id = ? ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, updated_at DESC",
+            (session_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def vote_state(session_id: str, vote_id: int, visitor_id: str | None = None) -> dict | None:
@@ -620,6 +638,39 @@ def get_ideas(session_id: str, visitor_id: str) -> dict:
     return {"ideas": items}
 
 
+@app.get("/api/rooms/{session_id}/todos")
+def get_todos(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    return {"todos": get_room_todos(session_id)}
+
+
+@app.put("/api/rooms/{session_id}/todos/{todo_id}")
+async def update_todo(session_id: str, todo_id: int, payload: TodoUpdateRequest) -> dict:
+    ensure_visitor(session_id, payload.visitor_id)
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="待办内容不能为空")
+    if payload.due_at:
+        try:
+            datetime.strptime(payload.due_at, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="截止日期格式应为 YYYY-MM-DD") from exc
+    with database() as connection:
+        existing = connection.execute(
+            "SELECT id FROM todos WHERE id = ? AND session_id = ?", (todo_id, session_id)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="找不到这条待办")
+        connection.execute(
+            "UPDATE todos SET title = ?, assignee = ?, status = ?, due_at = ?, updated_at = ? WHERE id = ?",
+            (title, payload.assignee.strip(), payload.status, payload.due_at or None, now_iso(), todo_id),
+        )
+    todo = next(item for item in get_room_todos(session_id) if item["id"] == todo_id)
+    todos = get_room_todos(session_id)
+    await manager.broadcast(session_id, {"type": "todo_update", "todos": todos})
+    return {"todo": todo}
+
+
 @app.get("/api/rooms/{session_id}/usage")
 def get_usage(session_id: str, visitor_id: str) -> dict:
     ensure_visitor(session_id, visitor_id)
@@ -923,6 +974,7 @@ async def generate_agent_reply(session_id: str, prompt: str) -> None:
         else:
             answer = await answer_room_prompt(
                 room["topic"], history, prompt, model=room["model"], session_id=session_id,
+                phase=room["phase"],
                 summary=json.dumps(summary_context, ensure_ascii=False) if summary_context else None,
                 structured_context=structured_context,
             )

@@ -117,6 +117,7 @@ async def answer_room_prompt(
     *,
     model: str | None = None,
     session_id: str | None = None,
+    phase: str = "diverge",
     summary: str | None = None,
     structured_context: str | None = None,
 ) -> str | None:
@@ -125,6 +126,10 @@ async def answer_room_prompt(
         "回答具体、克制、易读；不要伪造成员观点、决定、评分或待办。若依据不足，明确说还需要讨论什么。"
         f"\n房间主题：{topic}"
     )
+    if phase == "diverge":
+        system += "\n当前处于发散阶段：鼓励提出不同方向，先探索再筛选；不要催促团队过早拍板，也不要发起红队质疑。"
+    else:
+        system += "\n当前处于收敛阶段：聚焦待决定事项、依据、风险和明确的下一步；发现关键风险时可以提出克制的红队问题。"
     if summary:
         system += f"\n滚动总结：{summary}"
     if structured_context:

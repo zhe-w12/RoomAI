@@ -85,6 +85,10 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
                FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC LIMIT 20""",
             (session_id,),
         ).fetchall()
+        existing_todos = connection.execute(
+            "SELECT id, title, assignee, status, due_at FROM todos WHERE session_id = ? ORDER BY id DESC LIMIT 30",
+            (session_id,),
+        ).fetchall()
         members = [row["nickname"] for row in connection.execute(
             "SELECT nickname FROM visitors WHERE session_id = ?", (session_id,)
         ).fetchall()]
@@ -93,7 +97,9 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
     previous = json.loads(latest_summary["content"]) if latest_summary else {}
     prompt = {
         "previous_summary": previous,
+        "phase": room["phase"],
         "known_ideas": [dict(item) for item in existing_ideas],
+        "known_todos": [dict(item) for item in existing_todos],
         "member_names": members,
         "messages": [
             {"sender": item["sender_name"], "content": item["content"], "id": item["id"]}
@@ -104,10 +110,12 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "你是 RoomAI 的讨论分析员。只整理消息中真实出现的观点，不要补充事实。"
         "从最近消息增量更新滚动总结，识别值得进入想法池的新想法，并按 1-5 分评估六个维度。"
         "disagreements 只记录成员明确表达相反立场的具体事项；单纯未决定、缺少信息或同一立场的补充不算分歧。"
+        "房间处于发散阶段时，鼓励补充方向，不急于选定方案；处于收敛阶段时，优先指出待决定事项、风险和下一步。"
         "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称，"
-        "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务。"
+        "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务，待办 source_message_id 也必须来自输入消息 id。"
+        "待办应尽量关联 known_todos 中的 todo_id；只有消息里明确提到时才给负责人和截止日期，状态可为 open、done 或 dropped。"
         "只返回 JSON，格式为："
-        '{"summary":{"consensus":["..."],"disagreements":["..."],"todos":[{"title":"...","assignee":""}],'
+        '{"summary":{"consensus":["..."],"disagreements":["..."],"todos":[{"todo_id":1,"title":"...","assignee":"","status":"open","due_at":"YYYY-MM-DD","source_message_id":1}],'
         '"dimension_coverage":{"user":false,"technology":false,"time":false,"cost":false,"risk":false}},'
         '"ideas":[{"title":"...","description":"...","proposer_name":"","source_message_id":1,"merge_into":null,'
         '"dimensions":{"feasibility":3,"people_cost":3,"timeline":3,"risk":3,"innovation":3,"team_fit":3},"rationale":"..."}]}。'
@@ -146,10 +154,29 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
     summary_data = payload.get("summary") if isinstance(payload, dict) else None
     if not isinstance(summary_data, dict):
         return None
+    valid_recent_ids = {int(item["id"]) for item in recent}
+    valid_todo_ids = {int(item["id"]) for item in existing_todos}
     todos = []
     for item in summary_data.get("todos", []):
         if isinstance(item, dict) and str(item.get("title", "")).strip():
-            todos.append({"title": str(item["title"]).strip()[:300], "assignee": str(item.get("assignee", "")).strip()[:80]})
+            source_id = item.get("source_message_id")
+            if not isinstance(source_id, int) or source_id not in valid_recent_ids:
+                source_id = None
+            todo_id = item.get("todo_id")
+            if not isinstance(todo_id, int) or todo_id not in valid_todo_ids:
+                todo_id = None
+            status = item.get("status") if item.get("status") in {"open", "done", "dropped"} else "open"
+            due_at = str(item.get("due_at", "")).strip()[:10]
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due_at):
+                due_at = None
+            todos.append({
+                "todo_id": todo_id,
+                "title": str(item["title"]).strip()[:300],
+                "assignee": str(item.get("assignee", "")).strip()[:80],
+                "status": status,
+                "due_at": due_at,
+                "source_message_id": source_id,
+            })
     raw_coverage = summary_data.get("dimension_coverage") if isinstance(summary_data.get("dimension_coverage"), dict) else {}
     summary_data = {
         "consensus": _clean_list(summary_data.get("consensus")),
@@ -170,7 +197,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             "INSERT INTO summaries (session_id, version, content, through_message_id, created_at) VALUES (?, ?, ?, ?, ?)",
             (session_id, version, json.dumps(summary_data, ensure_ascii=False), latest_message, created_at),
         )
-        valid_source_ids = {int(item["id"]) for item in recent}
+        valid_source_ids = valid_recent_ids
         known_member_names = set(members)
         for raw in (payload.get("ideas") or [])[:5]:
             if not isinstance(raw, dict):
@@ -234,16 +261,30 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             if not title:
                 continue
             assignee = str(todo.get("assignee", "")).strip()[:80]
+            status = todo.get("status") if todo.get("status") in {"open", "done", "dropped"} else "open"
+            due_at = todo.get("due_at")
+            todo_id = todo.get("todo_id")
+            source_id = todo.get("source_message_id")
+            if not isinstance(source_id, int) or source_id not in valid_source_ids:
+                source_id = None
             existing = connection.execute(
+                "SELECT id FROM todos WHERE session_id = ? AND id = ?",
+                (session_id, todo_id),
+            ).fetchone() if isinstance(todo_id, int) else None
+            if not existing:
+                existing = connection.execute(
                 "SELECT id FROM todos WHERE session_id = ? AND title = ? COLLATE NOCASE AND status = 'open' ORDER BY id DESC LIMIT 1",
                 (session_id, title),
-            ).fetchone()
+                ).fetchone()
             if existing:
-                connection.execute("UPDATE todos SET assignee = ?, updated_at = ? WHERE id = ?", (assignee, created_at, existing["id"]))
+                connection.execute(
+                    "UPDATE todos SET title = ?, assignee = ?, status = ?, due_at = COALESCE(?, due_at), source_message_id = COALESCE(?, source_message_id), updated_at = ? WHERE id = ?",
+                    (title, assignee, status, due_at, source_id, created_at, existing["id"]),
+                )
             else:
                 connection.execute(
-                    "INSERT INTO todos (session_id, title, assignee, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                    (session_id, title, assignee, created_at, created_at),
+                    "INSERT INTO todos (session_id, title, assignee, status, due_at, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, title, assignee, status, due_at, source_id, created_at, created_at),
                 )
     summary_data["version"] = version
     summary_data["through_message_id"] = latest_message

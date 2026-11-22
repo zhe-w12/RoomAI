@@ -454,6 +454,18 @@ a { color: inherit; text-decoration: none; }
 .replay-empty { padding: 30px; color: var(--muted); border: 1px dashed var(--line); font-size: 12px; text-align: center; }
 .replay-error { color: var(--red); }
 
+.todo-heading { margin-top: 16px; }
+.todo-list { max-height: 160px; overflow: auto; display: grid; }
+.todo-item { width: 100%; display: flex; align-items: flex-start; gap: 8px; padding: 8px 2px; text-align: left; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; cursor: pointer; }
+.todo-item:hover { background: var(--bg-subtle); }
+.todo-state-mark { width: 15px; flex: 0 0 auto; color: var(--muted); font-size: 13px; line-height: 1.3; text-align: center; }
+.todo-item-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.todo-item-copy b { color: var(--ink-2); font-size: 11.5px; font-weight: 500; line-height: 1.45; }
+.todo-item-copy small { color: var(--muted); font-size: 10px; }
+.todo-item-closed .todo-item-copy b { color: var(--faint); text-decoration: line-through; }
+.todo-modal { width: min(100%, 460px); }
+.todo-modal h2 { margin-bottom: 10px; }
+
 @media (max-width: 760px) {
   .vote-card { padding: 12px; }
   .vote-option { min-height: 44px; }

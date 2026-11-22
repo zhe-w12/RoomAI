@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS todos (
     title TEXT NOT NULL,
     assignee TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'open',
+    due_at TEXT,
     source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -167,3 +168,6 @@ def database():
 def initialize_database() -> None:
     with database() as connection:
         connection.executescript(SCHEMA)
+        todo_columns = {row[1] for row in connection.execute("PRAGMA table_info(todos)")}
+        if "due_at" not in todo_columns:
+            connection.execute("ALTER TABLE todos ADD COLUMN due_at TEXT")

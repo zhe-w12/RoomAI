@@ -54,6 +54,18 @@ export type RoomUsage = {
   cost_configured: boolean;
 };
 
+export type Todo = {
+  id: number;
+  session_id: string;
+  title: string;
+  assignee: string;
+  status: "open" | "done" | "dropped";
+  due_at: string | null;
+  source_message_id: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type ReplayEvent = {
   id: string;
   type: "message" | "summary" | "idea" | "evaluation" | "vote" | "decision" | "todo";
@@ -114,6 +126,13 @@ export const api = {
     request<{ latest: SummaryVersion | null; history: SummaryVersion[] }>(`/api/rooms/${sessionId}/summary?visitor_id=${encodeURIComponent(visitorId)}`),
   getIdeas: (sessionId: string, visitorId: string) =>
     request<{ ideas: Idea[] }>(`/api/rooms/${sessionId}/ideas?visitor_id=${encodeURIComponent(visitorId)}`),
+  getTodos: (sessionId: string, visitorId: string) =>
+    request<{ todos: Todo[] }>(`/api/rooms/${sessionId}/todos?visitor_id=${encodeURIComponent(visitorId)}`),
+  updateTodo: (sessionId: string, visitorId: string, todo: Pick<Todo, "id" | "title" | "assignee" | "status" | "due_at">) =>
+    request<{ todo: Todo }>(`/api/rooms/${sessionId}/todos/${todo.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ visitor_id: visitorId, title: todo.title, assignee: todo.assignee, status: todo.status, due_at: todo.due_at }),
+    }),
   getUsage: (sessionId: string, visitorId: string) =>
     request<RoomUsage>(`/api/rooms/${sessionId}/usage?visitor_id=${encodeURIComponent(visitorId)}`),
   getVotes: (sessionId: string, visitorId: string) =>

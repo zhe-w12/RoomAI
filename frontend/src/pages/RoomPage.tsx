@@ -1,7 +1,7 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, History, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Undo2, X } from "lucide-react";
-import { api, Identity, Idea, loadIdentity, Member, Message, Room, RoomUsage, saveIdentity, SummaryVersion } from "../lib/api";
+import { api, Identity, Idea, loadIdentity, Member, Message, Room, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
 
@@ -19,6 +19,7 @@ export default function RoomPage() {
   const [summary, setSummary] = useState<SummaryVersion | null>(null);
   const [summaryVersions, setSummaryVersions] = useState<SummaryVersion[]>([]);
   const [ideas, setIdeas] = useState<Idea[]>([]);
+  const [todos, setTodos] = useState<Todo[]>([]);
   const [usage, setUsage] = useState<RoomUsage | null>(null);
   const [votes, setVotes] = useState<Vote[]>([]);
   const [unreadMentionIds, setUnreadMentionIds] = useState<number[]>([]);
@@ -32,6 +33,8 @@ export default function RoomPage() {
   const [search, setSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [summaryHistoryOpen, setSummaryHistoryOpen] = useState(false);
+  const [editingTodo, setEditingTodo] = useState<Todo | null>(null);
+  const [todoSaving, setTodoSaving] = useState(false);
   const [voteBusyIds, setVoteBusyIds] = useState<number[]>([]);
   const [modelSaving, setModelSaving] = useState(false);
   const [prepOpen, setPrepOpen] = useState(true);
@@ -80,7 +83,7 @@ export default function RoomPage() {
       }
       setIdentity(storedIdentity);
       try {
-        const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes] = await Promise.all([
+        const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos] = await Promise.all([
           api.getRoom(sessionId, storedIdentity.visitor_id),
           api.getMessages(sessionId, storedIdentity.visitor_id),
           api.getMentions(sessionId, storedIdentity.visitor_id),
@@ -88,6 +91,7 @@ export default function RoomPage() {
           api.getIdeas(sessionId, storedIdentity.visitor_id),
           api.getUsage(sessionId, storedIdentity.visitor_id),
           api.getVotes(sessionId, storedIdentity.visitor_id),
+          api.getTodos(sessionId, storedIdentity.visitor_id),
         ]);
         if (canceled) return;
         setRoom(nextRoom);
@@ -97,6 +101,7 @@ export default function RoomPage() {
         setIdeas(nextIdeas.ideas);
         setUsage(nextUsage);
         setVotes(nextVotes.votes);
+        setTodos(nextTodos.todos);
         setUnreadMentionIds(mentions.message_ids);
       } catch (err) {
         if (canceled) return;
@@ -165,6 +170,7 @@ export default function RoomPage() {
         if (data.type === "idea_update") setIdeas(data.ideas as Idea[]);
         if (data.type === "vote_created") setVotes((current) => [...current.filter((vote) => vote.id !== data.vote.id), data.vote as Vote]);
         if (data.type === "vote_update") setVotes((current) => current.map((vote) => vote.id === data.vote.id ? { ...vote, ...(data.vote as Vote), my_option_id: vote.my_option_id } : vote));
+        if (data.type === "todo_update") setTodos(data.todos as Todo[]);
       } catch {
         // Ignore malformed events and keep the chat connection alive.
       }
@@ -202,10 +208,11 @@ export default function RoomPage() {
       const joined = await api.joinByLink(sessionId, joinName.trim());
       saveIdentity(joined);
       setIdentity(joined);
-      const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes] = await Promise.all([
+      const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos] = await Promise.all([
         api.getRoom(sessionId, joined.visitor_id), api.getMessages(sessionId, joined.visitor_id), api.getMentions(sessionId, joined.visitor_id),
         api.getSummary(sessionId, joined.visitor_id), api.getIdeas(sessionId, joined.visitor_id), api.getUsage(sessionId, joined.visitor_id),
         api.getVotes(sessionId, joined.visitor_id),
+        api.getTodos(sessionId, joined.visitor_id),
       ]);
       setRoom(nextRoom);
       setMessages(nextMessages);
@@ -214,6 +221,7 @@ export default function RoomPage() {
       setIdeas(nextIdeas.ideas);
       setUsage(nextUsage);
       setVotes(nextVotes.votes);
+      setTodos(nextTodos.todos);
       setUnreadMentionIds(mentions.message_ids);
     } catch (err) {
       setRoomError(err instanceof Error ? err.message : "无法加入房间");
@@ -390,6 +398,27 @@ export default function RoomPage() {
     }
   }
 
+  async function saveTodo(event: FormEvent) {
+    event.preventDefault();
+    if (!identity || !editingTodo || todoSaving) return;
+    setTodoSaving(true);
+    try {
+      const result = await api.updateTodo(sessionId, identity.visitor_id, {
+        id: editingTodo.id,
+        title: editingTodo.title.trim(),
+        assignee: editingTodo.assignee.trim(),
+        status: editingTodo.status,
+        due_at: editingTodo.due_at,
+      });
+      setTodos((current) => current.map((todo) => todo.id === result.todo.id ? result.todo : todo));
+      setEditingTodo(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存待办失败");
+    } finally {
+      setTodoSaving(false);
+    }
+  }
+
   async function copyInvite() {
     try {
       await navigator.clipboard.writeText(`${window.location.origin}/room/${sessionId}`);
@@ -490,6 +519,12 @@ export default function RoomPage() {
         {summary.content.disagreements.length > 0 && <div className="summary-sub"><b>待讨论</b><span>{summary.content.disagreements[0]}</span></div>}
         {summary.content.todos.length > 0 && <div className="summary-sub"><b>下一步</b><span>{summary.content.todos[0].title}{summary.content.todos[0].assignee ? ` · ${summary.content.todos[0].assignee}` : ""}</span></div>}
       </> : <p className="side-empty">讨论开始后，RoomAI 会在这里整理共识、分歧和待办。</p>}
+
+      <div className="side-label-row todo-heading"><p className="side-label">待办</p><span className="count">{todos.filter((todo) => todo.status === "open").length} 未完成</span></div>
+      {todos.length ? <div className="todo-list">{todos.slice(0, 6).map((todo) => <button className={`todo-item ${todo.status !== "open" ? "todo-item-closed" : ""}`} key={todo.id} onClick={() => setEditingTodo(todo)}>
+        <span className="todo-state-mark">{todo.status === "done" ? "✓" : todo.status === "dropped" ? "–" : "○"}</span>
+        <span className="todo-item-copy"><b>{todo.title}</b><small>{todo.assignee || "待分配"} · {todo.status === "open" ? "未完成" : todo.status === "done" ? "已完成" : "已取消"}{todo.due_at ? ` · ${todo.due_at} 截止` : ""}</small></span>
+      </button>)}</div> : <p className="side-empty">讨论中明确的下一步会整理到这里。</p>}
 
       <div className="side-label-row"><p className="side-label">想法池</p><span className="count">{ideas.length}</span></div>
       {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <button className="idea-item" key={idea.id} onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
@@ -618,6 +653,18 @@ export default function RoomPage() {
           <p className="field-note">房主凭证保存在当前浏览器，清除浏览器数据后将无法管理房间。</p>
         </div>
       </section>
+    </div>}
+    {editingTodo && <div className="overlay" onClick={() => setEditingTodo(null)}>
+      <form className="modal todo-modal" onSubmit={(event) => void saveTodo(event)} onClick={(event) => event.stopPropagation()}>
+        <button type="button" className="icon-btn modal-close" onClick={() => setEditingTodo(null)} aria-label="关闭待办编辑"><X size={17} /></button>
+        <p className="eyebrow">下一步</p>
+        <h2>更新待办</h2>
+        <label className="field">待办内容<input required maxLength={300} value={editingTodo.title} onChange={(event) => setEditingTodo((current) => current ? { ...current, title: event.target.value } : current)} /></label>
+        <label className="field">负责人<input maxLength={80} value={editingTodo.assignee} onChange={(event) => setEditingTodo((current) => current ? { ...current, assignee: event.target.value } : current)} placeholder="待分配" /></label>
+        <label className="field">截止日期<input type="date" value={editingTodo.due_at || ""} onChange={(event) => setEditingTodo((current) => current ? { ...current, due_at: event.target.value || null } : current)} /></label>
+        <label className="field">状态<select value={editingTodo.status} onChange={(event) => setEditingTodo((current) => current ? { ...current, status: event.target.value as Todo["status"] } : current)}><option value="open">未完成</option><option value="done">已完成</option><option value="dropped">已取消</option></select></label>
+        <button className="btn btn-primary btn-block" disabled={todoSaving}>{todoSaving ? "正在保存…" : "保存待办"}</button>
+      </form>
     </div>}
     {summaryHistoryOpen && <div className="overlay" onClick={() => setSummaryHistoryOpen(false)}>
       <section className="modal summary-history-dialog" role="dialog" aria-modal="true" aria-labelledby="summary-history-title" onClick={(event) => event.stopPropagation()}>
