@@ -1,6 +1,6 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Activity, AtSign, ArrowDown, ArrowRight, Check, ChevronDown, CircleHelp, Clipboard, ClipboardCheck, Command, Copy, FileImage, ImagePlus, Lightbulb, LoaderCircle, Menu, MessageCircle, MoreHorizontal, Paperclip, Plus, Reply, Search, Send, Settings2, Sparkles, Undo2, Users, X } from "lucide-react";
+import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Command, Copy, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Undo2, X } from "lucide-react";
 import { api, Identity, Idea, loadIdentity, Member, Message, Room, RoomUsage, saveIdentity, SummaryVersion } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 
@@ -8,12 +8,6 @@ const commands = ["/总结", "/评估", "/投票", "/画图", "/挑战", "/待�
 
 function formatTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
-}
-
-function avatarColor(name: string) {
-  const colors = ["avatar-coral", "avatar-blue", "avatar-violet", "avatar-green", "avatar-amber"];
-  const index = [...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % colors.length;
-  return colors[index];
 }
 
 export default function RoomPage() {
@@ -35,6 +29,7 @@ export default function RoomPage() {
   const [search, setSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [modelSaving, setModelSaving] = useState(false);
+  const [prepOpen, setPrepOpen] = useState(true);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [composerValue, setComposerValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -254,8 +249,8 @@ export default function RoomPage() {
 
   function openMenu(message: Message, clientX: number, clientY: number) {
     // 桌面端浮窗：贴着按压点打开，别超出视口；手机上 CSS 会把它变成底部卡片。
-    const width = 216;
-    const height = 190;
+    const width = 200;
+    const height = 180;
     const x = Math.min(Math.max(8, clientX), window.innerWidth - width - 8);
     const y = clientY + height > window.innerHeight ? Math.max(8, clientY - height) : clientY;
     setConfirmRecall(false);
@@ -405,158 +400,163 @@ export default function RoomPage() {
   if (loading) return <div className="room-loading"><span className="brand-mark"><span /><span /><span /></span><span>正在打开讨论室…</span></div>;
 
   if (!identity || !room) return <main className="join-shell">
-    <a className="brand join-brand" href="/"><span className="brand-mark"><span /><span /><span /></span><span>room<span className="brand-ai">ai</span></span></a>
+    <a className="brand join-brand" href="/"><span className="brand-mark"><span /><span /><span /></span><span>roomai</span></a>
     <form className="join-card" onSubmit={joinByLink}>
-      <div className="join-card-icon"><Users size={22} /></div>
       <p className="eyebrow">你收到了一份讨论邀请</p>
       <h1>加入 RoomAI 房间</h1>
-      <p className="modal-subtitle">填上昵称，就能看到完整的讨论记录并加入对话。</p>
-      <label className="field-label">你的昵称<input autoFocus required maxLength={32} value={joinName} onChange={(event) => setJoinName(event.target.value)} placeholder="伙伴们怎么称呼你？" /></label>
+      <p className="modal-sub">填上昵称，就能看到完整的讨论记录并加入对话。</p>
+      <label className="field">你的昵称<input autoFocus required maxLength={32} value={joinName} onChange={(event) => setJoinName(event.target.value)} placeholder="伙伴们怎么称呼你？" /></label>
       {roomError && <p className="form-error">{roomError}</p>}
-      <button className="button button-primary button-submit" disabled={joining}>{joining ? <><span className="button-spinner" /> 正在加入…</> : <>进入讨论室 <ArrowRight size={17} /></>}</button>
+      <button className="btn btn-primary btn-block" disabled={joining}>{joining ? <><span className="btn-spinner" /> 正在加入…</> : <>进入讨论室 <ArrowRight size={16} /></>}</button>
       <a className="join-back" href="/">返回 RoomAI 首页</a>
     </form>
   </main>;
 
-  return <main className="room-app">
-    <div className={`sidebar-scrim ${sidebarOpen ? "visible" : ""}`} onClick={() => setSidebarOpen(false)} />
-    <aside className={`room-sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
-      <div className="sidebar-brand-row"><a className="brand" href="/"><span className="brand-mark"><span /><span /><span /></span><span>room<span className="brand-ai">ai</span></span></a><button className="icon-button mobile-sidebar-close" onClick={() => setSidebarOpen(false)} aria-label="关闭侧栏"><X size={18} /></button></div>
-      <div className="sidebar-section-label">讨论空间 <button className="icon-button tiny-icon" onClick={copyInvite} aria-label="复制邀请链接">{linkCopied ? <Check size={14} /> : <Plus size={15} />}</button></div>
-      <div className="sidebar-room-current"><span className="room-glyph"><MessageCircle size={16} /></span><span className="sidebar-room-name">{room.topic}</span><ChevronDown size={15} /></div>
-      <div className="sidebar-divider" />
+  return <main className="room">
+    <div className={`side-scrim ${sidebarOpen ? "visible" : ""}`} onClick={() => setSidebarOpen(false)} />
+    <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
+      <div className="side-top">
+        <a className="brand" href="/"><span className="brand-mark"><span /><span /><span /></span><span>roomai</span></a>
+        <button className="icon-btn mobile-side-close" onClick={() => setSidebarOpen(false)} aria-label="关闭侧栏"><X size={17} /></button>
+      </div>
 
-      <section className="sidebar-panel summary-panel">
-        <div className="panel-heading"><span className="panel-icon panel-icon-violet"><Sparkles size={15} /></span><h3>滚动总结</h3><span className="coming-pill">AI</span></div>
-        {summary ? <>
-          <div className="summary-version">最近更新 · v{summary.version}</div>
-          <div className="summary-items">{(summary.content.consensus.length ? summary.content.consensus : ["暂时还没有形成明确共识。 "]).slice(0, 3).map((item, index) => <p key={`${index}-${item}`}>{item}</p>)}</div>
-          {summary.content.disagreements.length > 0 && <div className="summary-note"><b>待讨论</b><span>{summary.content.disagreements[0]}</span></div>}
-          {summary.content.todos.length > 0 && <div className="summary-note summary-todo"><b>下一步</b><span>{summary.content.todos[0].title}{summary.content.todos[0].assignee ? ` · ${summary.content.todos[0].assignee}` : ""}</span></div>}
-        </> : <p className="panel-empty">讨论开始后，RoomAI 会在这里整理共识、分歧和待办。</p>}
-      </section>
+      <div className="side-room">
+        <span className="side-room-name">{room.topic}</span>
+        <button className="icon-btn" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <Check size={15} /> : <Clipboard size={15} />}</button>
+      </div>
 
-      <section className="sidebar-panel idea-panel">
-        <div className="panel-heading"><span className="panel-icon panel-icon-amber"><Lightbulb size={15} /></span><h3>想法池</h3><span className="count-pill">{ideas.length}</span></div>
-        {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <button className="idea-item" key={idea.id} onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
-          <span className="idea-item-title">{idea.title}</span><span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}</span>
-        </button>)}</div> : <div className="idea-empty"><div className="idea-empty-mark"><Plus size={15} /></div><span>值得做的想法，会在讨论中浮现</span></div>}
-      </section>
+      <p className="side-label">滚动总结</p>
+      {summary ? <>
+        <p className="summary-ver">最近更新 · v{summary.version}</p>
+        <ul className="summary-list">{(summary.content.consensus.length ? summary.content.consensus : ["暂时还没有形成明确共识。"]).slice(0, 3).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
+        {summary.content.disagreements.length > 0 && <div className="summary-sub"><b>待讨论</b><span>{summary.content.disagreements[0]}</span></div>}
+        {summary.content.todos.length > 0 && <div className="summary-sub"><b>下一步</b><span>{summary.content.todos[0].title}{summary.content.todos[0].assignee ? ` · ${summary.content.todos[0].assignee}` : ""}</span></div>}
+      </> : <p className="side-empty">讨论开始后，RoomAI 会在这里整理共识、分歧和待办。</p>}
 
-      <section className="sidebar-panel dimensions-panel">
-        <div className="panel-heading"><span className="panel-icon panel-icon-green"><Activity size={15} /></span><h3>讨论维度</h3></div>
-        <div className="dimension-list">{[["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]].map(([label, key]) => {
-          const covered = Boolean(summary?.content.dimension_coverage[key]);
-          return <div className={`dimension-row ${covered ? "dimension-covered" : ""}`} key={key}><span className="dimension-dot" />{label}<span>{covered ? "已讨论" : "待聊"}</span></div>;
-        })}</div>
-      </section>
+      <div className="side-label-row"><p className="side-label">想法池</p><span className="count">{ideas.length}</span></div>
+      {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <button className="idea-item" key={idea.id} onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
+        <span className="idea-item-title">{idea.title}</span><span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}</span>
+      </button>)}</div> : <p className="side-empty">值得做的想法，会在讨论中浮现。</p>}
 
-      <div className="sidebar-spacer" />
-      <div className="sidebar-help"><span className="help-avatar"><CircleHelp size={17} /></span><span><b>让讨论更有方向</b><small>试试在消息里 @RoomAI</small></span><ArrowRight size={14} /></div>
-      <div className="sidebar-profile"><div className={`avatar avatar-small ${avatarColor(identity.nickname)}`}>{identity.nickname.slice(0, 1)}</div><span><b>{identity.nickname}</b><small>{identity.owner_token ? "房间创建者" : "讨论成员"}</small></span><MoreHorizontal size={18} /></div>
+      <p className="side-label">讨论维度</p>
+      <div className="dim-list">{[["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]].map(([label, key]) => {
+        const covered = Boolean(summary?.content.dimension_coverage[key]);
+        return <div className={`dim-row ${covered ? "dim-done" : ""}`} key={key}><span className="dim-dot" />{label}<span>{covered ? "已讨论" : "待聊"}</span></div>;
+      })}</div>
+
+      <div className="side-spacer" />
+      <div className="side-me">
+        <div className="avatar avatar-sm">{identity.nickname.slice(0, 1)}</div>
+        <span><b>{identity.nickname}</b><small>{identity.owner_token ? "房间创建者" : "讨论成员"}</small></span>
+      </div>
     </aside>
 
-    <section className="room-main">
-      <header className="room-topbar">
-        <button className="icon-button mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="打开侧栏"><Menu size={20} /></button>
-        <div className="room-heading"><span className="room-heading-kicker">当前讨论</span><h1 title={room.topic}>{room.topic}</h1></div>
-        <div className="room-top-actions">
-          <button className={`phase-button ${room.phase === "converge" ? "phase-converge" : ""}`} onClick={togglePhase} disabled={!identity.owner_token} title={identity.owner_token ? "点击切换讨论阶段" : "发散阶段"}><span />{room.phase === "diverge" ? "发散阶段" : "收敛阶段"}<ChevronDown size={14} /></button>
-          <div className="online-group" title={`${onlineMembers.length} 人在线`}><div className="avatar-stack online-stack">{onlineMembers.slice(0, 3).map((member) => <i className={avatarColor(member.nickname)} key={member.visitor_id}>{member.nickname.slice(0, 1)}</i>)}</div><span className="online-count">{onlineMembers.length}<span>在线</span></span></div>
-          <span className="topbar-separator" />
-          {unreadMentionIds.length > 0 && <button className="mention-notice" onClick={() => void openUnreadMention()} title="跳转到未读 @ 提醒"><AtSign size={15} /><span>{unreadMentionIds.length}</span></button>}
-          <button className={`icon-button top-action ${searchOpen ? "active" : ""}`} onClick={() => { setSearchOpen((value) => !value); setSearch(""); }} aria-label="搜索消息"><Search size={18} /></button>
-          <button className="icon-button top-action settings-action" onClick={() => setSettingsOpen(true)} aria-label="房间设置" title="房间设置"><Settings2 size={18} /></button>
-          <button className="icon-button top-action" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={18} /> : <Clipboard size={18} />}</button>
-        </div>
+    <section className="main">
+      <header className="topbar">
+        <button className="icon-btn mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="打开侧栏"><Menu size={19} /></button>
+        <div className="topbar-title"><h1 title={room.topic}>{room.topic}</h1></div>
+        <button className={`phase-btn ${room.phase === "converge" ? "phase-converge" : ""}`} onClick={togglePhase} disabled={!identity.owner_token} title={identity.owner_token ? "点击切换讨论阶段" : "发散阶段"}><i />{room.phase === "diverge" ? "发散" : "收敛"}</button>
+        <div className="online" title={`${onlineMembers.length} 人在线`}><span className="online-stack">{onlineMembers.slice(0, 3).map((member) => <i key={member.visitor_id}>{member.nickname.slice(0, 1)}</i>)}</span><span>{onlineMembers.length} 在线</span></div>
+        <span className="top-sep" />
+        {unreadMentionIds.length > 0 && <button className="mention-badge" onClick={() => void openUnreadMention()} title="跳转到未读 @ 提醒"><AtSign size={13} /><span>{unreadMentionIds.length}</span></button>}
+        <button className={`icon-btn ${searchOpen ? "active" : ""}`} onClick={() => { setSearchOpen((value) => !value); setSearch(""); }} aria-label="搜索消息"><Search size={17} /></button>
+        <button className="icon-btn" onClick={() => setSettingsOpen(true)} aria-label="房间设置" title="房间设置"><Settings2 size={17} /></button>
+        <button className="icon-btn" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={17} /> : <Clipboard size={17} />}</button>
       </header>
 
-      {searchOpen && <div className="room-search"><Search size={17} /><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索消息或发言人…" /><span>{search ? `${filteredMessages.length} 条` : "Enter 搜索"}</span><button className="icon-button" onClick={() => { setSearchOpen(false); setSearch(""); }} aria-label="关闭搜索"><X size={16} /></button></div>}
+      {searchOpen && <div className="searchbar"><Search size={16} /><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索消息或发言人…" /><span>{search ? `${filteredMessages.length} 条` : "输入关键词筛选"}</span><button className="icon-btn" onClick={() => { setSearchOpen(false); setSearch(""); }} aria-label="关闭搜索"><X size={15} /></button></div>}
 
-      <section className="room-chat-area">
-        <div className="prep-card">
-          <div className="prep-leading"><span className="prep-icon"><Clipboard size={16} /></span><span><b>开始前想一想</b><small>围绕主题，先带着这些问题进入讨论</small></span></div>
-          <div className="prep-questions">{room.prep_checklist.map((question, index) => <span key={question}><i>0{index + 1}</i>{question}</span>)}</div>
-          <button className="prep-collapse" aria-label="收起准备清单"><ChevronDown size={16} /></button>
-        </div>
+      <section className="chat">
+        {room.prep_checklist.length > 0 && <div className="prep">
+          <button className="prep-head" onClick={() => setPrepOpen((value) => !value)}><ChevronDown size={15} className={prepOpen ? "open" : ""} />开始前想一想<span>{room.prep_checklist.length} 个问题</span></button>
+          {prepOpen && <ol className="prep-body">{room.prep_checklist.map((question) => <li key={question}>{question}</li>)}</ol>}
+        </div>}
 
-        <div className="message-list" ref={listRef} onScroll={onScroll}>
-          <div className="conversation-start"><span className="start-line" /><span>讨论从这里开始</span><span className="start-line" /></div>
+        <div className="msg-list" ref={listRef} onScroll={onScroll}>
+          <div className="msg-start">讨论从这里开始</div>
           {filteredMessages.map((message, index) => {
             const own = message.visitor_id === identity.visitor_id;
             const previous = filteredMessages[index - 1];
             const showAuthor = !previous || previous.sender_name !== message.sender_name || new Date(message.created_at).getTime() - new Date(previous.created_at).getTime() > 5 * 60 * 1000;
             const mentioned = !own && message.content.includes(`@${identity.nickname}`);
-            return <article id={`message-${message.id}`} key={message.id} className={`message-row ${own ? "message-own" : ""} ${message.sender_type === "agent" ? "message-agent-row" : ""} ${mentioned ? "mention-alert" : ""} ${quoteFlash === message.id ? "message-flash" : ""} ${menu?.message.id === message.id ? "menu-open" : ""}`}>
-              {!own && <div className={`avatar message-avatar ${message.sender_type === "agent" ? "avatar-ai" : avatarColor(message.sender_name)}`}>{message.sender_type === "agent" ? <Sparkles size={15} /> : message.sender_name.slice(0, 1)}</div>}
-              <div className="message-stack">
-                {showAuthor && <div className={`message-meta ${own ? "meta-own" : ""}`}><span className={message.sender_type === "agent" ? "agent-name" : ""}>{message.sender_type === "agent" && <Sparkles size={12} />}{message.sender_name}{message.sender_type === "agent" && <i className="ai-label">AI 助手</i>}</span><time>{formatTime(message.created_at)}</time></div>}
-                <div className={`message-bubble ${own ? "bubble-own" : ""} ${message.sender_type === "agent" ? "bubble-agent" : ""} ${message.is_recalled ? "bubble-recalled" : ""} ${pressingId === message.id ? "bubble-pressing" : ""}`} onPointerDown={(event) => startPress(message, event)} onPointerUp={cancelPress} onPointerLeave={cancelPress} onPointerMove={handlePressMove} onContextMenu={(event) => { event.preventDefault(); if (!message.is_recalled) openMenu(message, event.clientX, event.clientY); }}>
-                  {message.reply_to && <button className="quoted-message" onClick={() => jumpToMessage(message.reply_to!.id)}><span className="quote-bar" /><span><b>{message.reply_to.sender_name}</b><small>{message.reply_to.content}</small></span></button>}
-                  {message.is_recalled ? <span className="recalled-copy">这条消息已撤回</span> : <>
+            return <article id={`message-${message.id}`} key={message.id} className={`msg ${own ? "msg-own" : ""} ${mentioned ? "msg-mention" : ""} ${quoteFlash === message.id ? "msg-flash" : ""} ${menu?.message.id === message.id ? "msg-open" : ""}`}>
+              <div className={`avatar msg-avatar ${message.sender_type === "agent" ? "avatar-ai" : ""}`}>{message.sender_type === "agent" ? <Sparkles size={13} /> : message.sender_name.slice(0, 1)}</div>
+              <div className="msg-main">
+                {showAuthor && <div className="msg-meta"><b className={message.sender_type === "agent" ? "agent-name" : ""}>{message.sender_name}</b>{message.sender_type === "agent" && <i className="tag-ai">AI</i>}<time>{formatTime(message.created_at)}</time></div>}
+                <div className={`msg-body ${pressingId === message.id ? "msg-pressing" : ""}`} onPointerDown={(event) => startPress(message, event)} onPointerUp={cancelPress} onPointerLeave={cancelPress} onPointerMove={handlePressMove} onContextMenu={(event) => { event.preventDefault(); if (!message.is_recalled) openMenu(message, event.clientX, event.clientY); }}>
+                  {message.reply_to && <button className="quote" onClick={() => jumpToMessage(message.reply_to!.id)}><span><b>{message.reply_to.sender_name}</b><small>{message.reply_to.content}</small></span></button>}
+                  {message.is_recalled ? <span className="msg-recalled">这条消息已撤回</span> : <>
                     {message.content && (message.sender_type === "agent"
                       ? <MarkdownContent content={message.content} />
-                      : <p className="message-content">{message.content.split(/(@[\w\u4e00-\u9fff-]+)/g).map((part, partIndex) => part.startsWith("@") ? <mark className="mention-mark" key={partIndex}>{part}</mark> : part)}</p>)}
-                    {message.image_url && <button className="message-image" onClick={() => window.open(api.imageUrl(message.image_url!), "_blank", "noopener,noreferrer")}><img src={api.imageUrl(message.image_url)} alt="讨论附件" /><span><FileImage size={14} /> 查看图片</span></button>}
+                      : <p className="msg-text">{message.content.split(/(@[\w\u4e00-\u9fff-]+)/g).map((part, partIndex) => part.startsWith("@") ? <mark className="mention-mark" key={partIndex}>{part}</mark> : part)}</p>)}
+                    {message.image_url && <button className="msg-img" onClick={() => window.open(api.imageUrl(message.image_url!), "_blank", "noopener,noreferrer")}><img src={api.imageUrl(message.image_url)} alt="讨论附件" /></button>}
                   </>}
                 </div>
               </div>
-              {own && <div className={`avatar message-avatar ${avatarColor(identity.nickname)}`}>{identity.nickname.slice(0, 1)}</div>}
             </article>;
           })}
-          {typingNames.length > 0 && <div className="typing-line"><span className="typing-dots"><i /><i /><i /></span>{typingNames.join("、")} 正在输入…</div>}
+          {typingNames.length > 0 && <div className="typing"><span className="typing-dots"><i /><i /><i /></span>{typingNames.join("、")} 正在输入…</div>}
           <div ref={bottomRef} />
         </div>
 
-        {!nearBottom && newMessages && <button className="new-messages-button" onClick={() => setNearBottom(true)}>有新消息 <ArrowDown size={15} /></button>}
-        {error && <div className="message-error"><span>{error}</span><button onClick={() => setError("")} aria-label="关闭"><X size={14} /></button></div>}
+        {!nearBottom && newMessages && <button className="new-msg-btn" onClick={() => setNearBottom(true)}>有新消息 <ArrowDown size={14} /></button>}
+        {error && <div className="alert"><span>{error}</span><button onClick={() => setError("")} aria-label="关闭"><X size={14} /></button></div>}
         {toast && <div className="toast"><Check size={13} /><span>{toast}</span></div>}
         {menu && <>
-          <div className="message-menu-backdrop" onClick={closeMenu} onContextMenu={(event) => event.preventDefault()} />
-          <div className="message-menu" style={{ left: menu.x, top: menu.y }} role="menu">
+          <div className="menu-backdrop" onClick={closeMenu} onContextMenu={(event) => event.preventDefault()} />
+          <div className="menu" style={{ left: menu.x, top: menu.y }} role="menu">
             {confirmRecall ? <>
-              <div className="menu-confirm-title">撤回这条消息？</div>
-              <div className="menu-confirm-sub">撤回后，所有人都会看到“这条消息已撤回”。</div>
-              <button className="menu-item-danger" onClick={() => void recall(menu.message)}><Undo2 size={15} /> 确定撤回</button>
+              <div className="menu-title">撤回这条消息？</div>
+              <div className="menu-sub">撤回后，所有人都会看到“这条消息已撤回”。</div>
+              <button className="menu-danger" onClick={() => void recall(menu.message)}><Undo2 size={15} /> 确定撤回</button>
               <button onClick={() => setConfirmRecall(false)}><X size={15} /> 取消</button>
             </> : <>
               <button onClick={() => replyFromMenu(menu.message)}><Reply size={15} /> 引用回复</button>
               {menu.message.content && <button onClick={() => void copyMessage(menu.message)}><Copy size={15} /> 复制</button>}
               {canRecall(menu.message) && <>
-                <div className="menu-divider" />
-                <button className="menu-item-danger" onClick={() => setConfirmRecall(true)}><Undo2 size={15} /> 撤回</button>
+                <div className="menu-sep" />
+                <button className="menu-danger" onClick={() => setConfirmRecall(true)}><Undo2 size={15} /> 撤回</button>
               </>}
             </>}
           </div>
         </>}
 
         <div className="composer-wrap">
-          {replyTo && <div className="reply-context"><span className="quote-bar" /><span><b>回复 {replyTo.sender_name}</b><small>{replyTo.content || "图片"}</small></span><button className="icon-button" onClick={() => setReplyTo(null)} aria-label="取消引用"><X size={15} /></button></div>}
-          {imagePreview && <div className="upload-preview"><img src={imagePreview} alt="待发送图片" /><button className="icon-button" onClick={() => setSelectedImage(null)} aria-label="移除图片"><X size={15} /></button></div>}
+          {replyTo && <div className="reply-bar"><span><b>回复 {replyTo.sender_name}</b><small>{replyTo.content || "图片"}</small></span><button className="icon-btn" onClick={() => setReplyTo(null)} aria-label="取消引用"><X size={14} /></button></div>}
+          {imagePreview && <div className="upload-preview"><img src={imagePreview} alt="待发送图片" /><button className="icon-btn" onClick={() => setSelectedImage(null)} aria-label="移除图片"><X size={13} /></button></div>}
           <form className="composer" onSubmit={(event) => void submitMessage(event)}>
-            <div className="composer-tools"><label className="icon-button attach-button" title="添加图片"><ImagePlus size={18} /><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => { const file = event.target.files?.[0]; if (file && file.size <= 5 * 1024 * 1024) setSelectedImage(file); else if (file) setError("图片大小不能超过 5MB"); event.currentTarget.value = ""; }} /></label><button type="button" className="icon-button command-button" title="快捷指令" onClick={() => { setComposerValue("/"); composerRef.current?.focus(); }}><Command size={17} /></button></div>
-            <div className="composer-input-wrap">
-              {showCommands && <div className="suggestion-menu command-menu">{commands.filter((command) => command.startsWith(composerValue.slice(commandEnd))).map((command) => <button type="button" onClick={() => void selectCommand(command)} key={command}><span>{command}</span><small>RoomAI 快捷指令</small><ChevronDown size={14} /></button>)}</div>}
-              {mentionMatch && mentionOptions.length > 0 && <div className="suggestion-menu mention-menu"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-small avatar-ai"><Sparkles size={13} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className={`avatar avatar-small ${avatarColor(member.nickname)}`}>{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
+            <div className="composer-tools">
+              <label className="icon-btn attach" title="添加图片"><ImagePlus size={17} /><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => { const file = event.target.files?.[0]; if (file && file.size <= 5 * 1024 * 1024) setSelectedImage(file); else if (file) setError("图片大小不能超过 5MB"); event.currentTarget.value = ""; }} /></label>
+              <button type="button" className="icon-btn" title="快捷指令" onClick={() => { setComposerValue("/"); composerRef.current?.focus(); }}><Command size={16} /></button>
+            </div>
+            <div className="composer-input">
+              {showCommands && <div className="suggest suggest-cmd">{commands.filter((command) => command.startsWith(composerValue.slice(commandEnd))).map((command) => <button type="button" onClick={() => void selectCommand(command)} key={command}><span>{command}</span><small>RoomAI 快捷指令</small></button>)}</div>}
+              {mentionMatch && mentionOptions.length > 0 && <div className="suggest suggest-mention"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-sm avatar-ai"><Sparkles size={12} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className="avatar avatar-sm">{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
               <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder="说说你的想法…（输入 / 查看指令，@ 提及伙伴）" />
             </div>
-            <button className="send-button" disabled={sending || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={18} className="spin" /> : <Send size={17} />}</button>
+            <button className="send-btn" disabled={sending || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={17} className="spin" /> : <Send size={16} />}</button>
           </form>
-          <div className="composer-foot"><span><Paperclip size={12} /> 图片最大 5MB</span><span><kbd>Enter</kbd> 发送 <i /> <kbd>Shift + Enter</kbd> 换行</span></div>
+          <div className="composer-hint"><span>图片最大 5MB</span><span><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span></div>
         </div>
       </section>
     </section>
-    {settingsOpen && <div className="settings-backdrop" onClick={() => setSettingsOpen(false)}>
-      <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onClick={(event) => event.stopPropagation()}>
-        <div className="settings-dialog-heading"><div><span className="eyebrow">ROOM SETTINGS</span><h2 id="settings-title">房间设置</h2></div><button className="icon-button" onClick={() => setSettingsOpen(false)} aria-label="关闭设置"><X size={18} /></button></div>
-        <div className="settings-block"><label className="field-label" htmlFor="model-select">讨论模型</label>
+    {settingsOpen && <div className="overlay" onClick={() => setSettingsOpen(false)}>
+      <section className="modal settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" onClick={(event) => event.stopPropagation()}>
+        <button className="icon-btn modal-close" onClick={() => setSettingsOpen(false)} aria-label="关闭设置"><X size={17} /></button>
+        <p className="eyebrow">房间设置</p>
+        <h2 id="settings-title">设置</h2>
+        <div className="settings-block">
+          <label className="field" htmlFor="model-select">讨论模型</label>
           <select id="model-select" value={room.model} disabled={!identity.owner_token || modelSaving || room.available_models.length < 2} onChange={(event) => void changeModel(event.target.value)}>
             {room.available_models.map((model) => <option key={model} value={model}>{model}</option>)}
           </select>
-          <small>{identity.owner_token ? "切换后仅影响之后的新调用。" : "只有房主可以切换模型。"}</small>
+          <p className="field-note">{identity.owner_token ? "切换后仅影响之后的新调用。" : "只有房主可以切换模型。"}</p>
         </div>
         <div className="settings-usage"><b>本次讨论用量</b><span>{(usage?.total_tokens || 0).toLocaleString("zh-CN")} tokens</span><small>{usage?.cost_configured ? `估算费用 ¥${usage.cost_estimate.toFixed(4)}` : "费用价格未配置；可在 .env 设置模型单价。"}</small></div>
-        <div className="settings-block"><button className="button button-secondary button-submit" onClick={() => void copyInvite()}>{linkCopied ? <ClipboardCheck size={16} /> : <Clipboard size={16} />} {linkCopied ? "已复制邀请链接" : "复制邀请链接"}</button><small>房主凭证保存在当前浏览器，清除浏览器数据后将无法管理房间。</small></div>
+        <div className="settings-block">
+          <button className="btn btn-block" onClick={() => void copyInvite()}>{linkCopied ? <ClipboardCheck size={15} /> : <Clipboard size={15} />} {linkCopied ? "已复制邀请链接" : "复制邀请链接"}</button>
+          <p className="field-note">房主凭证保存在当前浏览器，清除浏览器数据后将无法管理房间。</p>
+        </div>
       </section>
     </div>}
   </main>;
