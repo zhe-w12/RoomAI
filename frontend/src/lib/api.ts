@@ -54,6 +54,15 @@ export type RoomUsage = {
   cost_configured: boolean;
 };
 
+export type ReplayEvent = {
+  id: string;
+  type: "message" | "summary" | "idea" | "evaluation" | "vote" | "decision" | "todo";
+  title: string;
+  detail: string;
+  created_at: string;
+  message_id: number | null;
+};
+
 export type Message = {
   id: number;
   session_id: string;
@@ -107,6 +116,18 @@ export const api = {
     request<{ ideas: Idea[] }>(`/api/rooms/${sessionId}/ideas?visitor_id=${encodeURIComponent(visitorId)}`),
   getUsage: (sessionId: string, visitorId: string) =>
     request<RoomUsage>(`/api/rooms/${sessionId}/usage?visitor_id=${encodeURIComponent(visitorId)}`),
+  getVotes: (sessionId: string, visitorId: string) =>
+    request<{ votes: import("../components/VoteCard").Vote[] }>(`/api/rooms/${sessionId}/votes?visitor_id=${encodeURIComponent(visitorId)}`),
+  castVote: (sessionId: string, voteId: number, visitorId: string, optionId: number) =>
+    request<{ vote: import("../components/VoteCard").Vote }>(`/api/rooms/${sessionId}/votes/${voteId}/records`, {
+      method: "POST", body: JSON.stringify({ visitor_id: visitorId, option_id: optionId }),
+    }),
+  closeVote: (sessionId: string, voteId: number, identity: Identity) =>
+    request<{ vote: import("../components/VoteCard").Vote }>(`/api/rooms/${sessionId}/votes/${voteId}/close`, {
+      method: "POST", body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token }),
+    }),
+  getReplay: (sessionId: string, visitorId: string) =>
+    request<{ topic: string; events: ReplayEvent[] }>(`/api/rooms/${sessionId}/replay?visitor_id=${encodeURIComponent(visitorId)}`),
   getMentions: (sessionId: string, visitorId: string) =>
     request<{ message_ids: number[] }>(`/api/rooms/${sessionId}/mentions?visitor_id=${encodeURIComponent(visitorId)}`),
   markMentionsRead: (sessionId: string, identity: Identity, message_ids: number[]) =>

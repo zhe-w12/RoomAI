@@ -103,6 +103,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
     system = (
         "你是 RoomAI 的讨论分析员。只整理消息中真实出现的观点，不要补充事实。"
         "从最近消息增量更新滚动总结，识别值得进入想法池的新想法，并按 1-5 分评估六个维度。"
+        "disagreements 只记录成员明确表达相反立场的具体事项；单纯未决定、缺少信息或同一立场的补充不算分歧。"
         "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称，"
         "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务。"
         "只返回 JSON，格式为："

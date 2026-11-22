@@ -1,8 +1,9 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Command, Copy, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, History, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Undo2, X } from "lucide-react";
 import { api, Identity, Idea, loadIdentity, Member, Message, Room, RoomUsage, saveIdentity, SummaryVersion } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
+import VoteCard, { Vote } from "../components/VoteCard";
 
 const commands = ["/总结", "/评估", "/投票", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
 
@@ -16,8 +17,10 @@ export default function RoomPage() {
   const [room, setRoom] = useState<Room | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [summary, setSummary] = useState<SummaryVersion | null>(null);
+  const [summaryVersions, setSummaryVersions] = useState<SummaryVersion[]>([]);
   const [ideas, setIdeas] = useState<Idea[]>([]);
   const [usage, setUsage] = useState<RoomUsage | null>(null);
+  const [votes, setVotes] = useState<Vote[]>([]);
   const [unreadMentionIds, setUnreadMentionIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [roomError, setRoomError] = useState("");
@@ -28,6 +31,8 @@ export default function RoomPage() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [summaryHistoryOpen, setSummaryHistoryOpen] = useState(false);
+  const [voteBusyIds, setVoteBusyIds] = useState<number[]>([]);
   const [modelSaving, setModelSaving] = useState(false);
   const [prepOpen, setPrepOpen] = useState(true);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -75,20 +80,23 @@ export default function RoomPage() {
       }
       setIdentity(storedIdentity);
       try {
-        const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage] = await Promise.all([
+        const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes] = await Promise.all([
           api.getRoom(sessionId, storedIdentity.visitor_id),
           api.getMessages(sessionId, storedIdentity.visitor_id),
           api.getMentions(sessionId, storedIdentity.visitor_id),
           api.getSummary(sessionId, storedIdentity.visitor_id),
           api.getIdeas(sessionId, storedIdentity.visitor_id),
           api.getUsage(sessionId, storedIdentity.visitor_id),
+          api.getVotes(sessionId, storedIdentity.visitor_id),
         ]);
         if (canceled) return;
         setRoom(nextRoom);
         setMessages(nextMessages);
         setSummary(nextSummary.latest);
+        setSummaryVersions(nextSummary.history);
         setIdeas(nextIdeas.ideas);
         setUsage(nextUsage);
+        setVotes(nextVotes.votes);
         setUnreadMentionIds(mentions.message_ids);
       } catch (err) {
         if (canceled) return;
@@ -104,6 +112,19 @@ export default function RoomPage() {
   }, [sessionId]);
 
   useEffect(() => { nearBottomRef.current = nearBottom; }, [nearBottom]);
+
+  useEffect(() => {
+    if (loading || !window.location.hash.startsWith("#message-")) return;
+    const messageId = Number(window.location.hash.slice("#message-".length));
+    if (!Number.isInteger(messageId)) return;
+    const timer = window.setTimeout(() => {
+      document.getElementById(`message-${messageId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setQuoteFlash(messageId);
+      setNearBottom(false);
+      window.setTimeout(() => setQuoteFlash(null), 1500);
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [loading, sessionId]);
 
   useEffect(() => {
     if (!identity || !room) return;
@@ -131,15 +152,19 @@ export default function RoomPage() {
         if (data.type === "phase_changed") setRoom((current) => current ? { ...current, phase: data.phase } : current);
         if (data.type === "model_changed") setRoom((current) => current ? { ...current, model: data.model } : current);
         if (data.type === "summary_update") {
-          setSummary({
+          const nextSummary = {
             version: data.summary.version,
             content: data.summary,
             through_message_id: data.summary.through_message_id,
             created_at: data.summary.created_at,
-          } as SummaryVersion);
+          } as SummaryVersion;
+          setSummary(nextSummary);
+          setSummaryVersions((current) => [nextSummary, ...current.filter((item) => item.version !== nextSummary.version)].slice(0, 20));
           void api.getUsage(sessionId, identity.visitor_id).then(setUsage).catch(() => undefined);
         }
         if (data.type === "idea_update") setIdeas(data.ideas as Idea[]);
+        if (data.type === "vote_created") setVotes((current) => [...current.filter((vote) => vote.id !== data.vote.id), data.vote as Vote]);
+        if (data.type === "vote_update") setVotes((current) => current.map((vote) => vote.id === data.vote.id ? { ...vote, ...(data.vote as Vote), my_option_id: vote.my_option_id } : vote));
       } catch {
         // Ignore malformed events and keep the chat connection alive.
       }
@@ -177,15 +202,18 @@ export default function RoomPage() {
       const joined = await api.joinByLink(sessionId, joinName.trim());
       saveIdentity(joined);
       setIdentity(joined);
-      const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage] = await Promise.all([
+      const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes] = await Promise.all([
         api.getRoom(sessionId, joined.visitor_id), api.getMessages(sessionId, joined.visitor_id), api.getMentions(sessionId, joined.visitor_id),
         api.getSummary(sessionId, joined.visitor_id), api.getIdeas(sessionId, joined.visitor_id), api.getUsage(sessionId, joined.visitor_id),
+        api.getVotes(sessionId, joined.visitor_id),
       ]);
       setRoom(nextRoom);
       setMessages(nextMessages);
       setSummary(nextSummary.latest);
+      setSummaryVersions(nextSummary.history);
       setIdeas(nextIdeas.ideas);
       setUsage(nextUsage);
+      setVotes(nextVotes.votes);
       setUnreadMentionIds(mentions.message_ids);
     } catch (err) {
       setRoomError(err instanceof Error ? err.message : "无法加入房间");
@@ -336,6 +364,32 @@ export default function RoomPage() {
     }
   }
 
+  async function castVote(voteId: number, optionId: number) {
+    if (!identity || voteBusyIds.includes(voteId)) return;
+    setVoteBusyIds((current) => [...current, voteId]);
+    try {
+      const result = await api.castVote(sessionId, voteId, identity.visitor_id, optionId);
+      setVotes((current) => current.map((vote) => vote.id === voteId ? result.vote : vote));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "投票失败，请重试");
+    } finally {
+      setVoteBusyIds((current) => current.filter((id) => id !== voteId));
+    }
+  }
+
+  async function closeVote(voteId: number) {
+    if (!identity || !identity.owner_token || voteBusyIds.includes(voteId)) return;
+    setVoteBusyIds((current) => [...current, voteId]);
+    try {
+      const result = await api.closeVote(sessionId, voteId, identity);
+      setVotes((current) => current.map((vote) => vote.id === voteId ? result.vote : vote));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "结束投票失败");
+    } finally {
+      setVoteBusyIds((current) => current.filter((id) => id !== voteId));
+    }
+  }
+
   async function copyInvite() {
     try {
       await navigator.clipboard.writeText(`${window.location.origin}/room/${sessionId}`);
@@ -395,6 +449,7 @@ export default function RoomPage() {
     const query = search.trim().toLowerCase();
     return messages.filter((message) => message.content.toLowerCase().includes(query) || message.sender_name.toLowerCase().includes(query));
   }, [messages, search]);
+  const votesByMessage = useMemo(() => new Map(votes.map((vote) => [vote.message_id, vote])), [votes]);
   const onlineMembers = room?.members.filter((member) => onlineIds.includes(member.visitor_id)) || [];
 
   if (loading) return <div className="room-loading"><span className="brand-mark"><span /><span /><span /></span><span>正在打开讨论室…</span></div>;
@@ -425,7 +480,10 @@ export default function RoomPage() {
         <button className="icon-btn" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <Check size={15} /> : <Clipboard size={15} />}</button>
       </div>
 
-      <p className="side-label">滚动总结</p>
+      <div className="side-label-row">
+        <p className="side-label">滚动总结</p>
+        <button className="history-button" disabled={!summaryVersions.length} onClick={() => setSummaryHistoryOpen(true)}><History size={13} />历史</button>
+      </div>
       {summary ? <>
         <p className="summary-ver">最近更新 · v{summary.version}</p>
         <ul className="summary-list">{(summary.content.consensus.length ? summary.content.consensus : ["暂时还没有形成明确共识。"]).slice(0, 3).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
@@ -444,6 +502,7 @@ export default function RoomPage() {
         return <div className={`dim-row ${covered ? "dim-done" : ""}`} key={key}><span className="dim-dot" />{label}<span>{covered ? "已讨论" : "待聊"}</span></div>;
       })}</div>
 
+      <a className="sidebar-replay-link" href={`/room/${sessionId}/replay`}><Clock3 size={15} /><span>讨论回放</span><ArrowRight size={13} /></a>
       <div className="side-spacer" />
       <div className="side-me">
         <div className="avatar avatar-sm">{identity.nickname.slice(0, 1)}</div>
@@ -492,6 +551,7 @@ export default function RoomPage() {
                     {message.image_url && <button className="msg-img" onClick={() => window.open(api.imageUrl(message.image_url!), "_blank", "noopener,noreferrer")}><img src={api.imageUrl(message.image_url)} alt="讨论附件" /></button>}
                   </>}
                 </div>
+                {votesByMessage.has(message.id) && <VoteCard vote={votesByMessage.get(message.id)!} isOwner={Boolean(identity.owner_token)} busy={voteBusyIds.includes(votesByMessage.get(message.id)!.id)} onVote={(voteId, optionId) => void castVote(voteId, optionId)} onClose={(voteId) => void closeVote(voteId)} />}
               </div>
             </article>;
           })}
@@ -557,6 +617,17 @@ export default function RoomPage() {
           <button className="btn btn-block" onClick={() => void copyInvite()}>{linkCopied ? <ClipboardCheck size={15} /> : <Clipboard size={15} />} {linkCopied ? "已复制邀请链接" : "复制邀请链接"}</button>
           <p className="field-note">房主凭证保存在当前浏览器，清除浏览器数据后将无法管理房间。</p>
         </div>
+      </section>
+    </div>}
+    {summaryHistoryOpen && <div className="overlay" onClick={() => setSummaryHistoryOpen(false)}>
+      <section className="modal summary-history-dialog" role="dialog" aria-modal="true" aria-labelledby="summary-history-title" onClick={(event) => event.stopPropagation()}>
+        <div className="summary-history-heading"><div><span className="eyebrow">ROOMAI MEMORY</span><h2 id="summary-history-title">总结历史</h2></div><button className="icon-btn" onClick={() => setSummaryHistoryOpen(false)} aria-label="关闭历史总结"><X size={17} /></button></div>
+        <div className="summary-history-list">{summaryVersions.map((version) => <article className="summary-history-item" key={version.version}>
+          <header><b>版本 {version.version}</b><time>{formatTime(version.created_at)}</time></header>
+          <h3>共识</h3>{version.content.consensus.length ? version.content.consensus.map((item, index) => <p key={`${index}-${item}`}>{item}</p>) : <p>暂无明确共识</p>}
+          {version.content.disagreements.length > 0 && <><h3>分歧</h3>{version.content.disagreements.map((item, index) => <p key={`${index}-${item}`}>{item}</p>)}</>}
+          {version.content.todos.length > 0 && <><h3>待办</h3>{version.content.todos.map((item, index) => <p key={`${index}-${item.title}`}>{item.title}{item.assignee ? ` · ${item.assignee}` : ""}</p>)}</>}
+        </article>)}</div>
       </section>
     </div>}
   </main>;

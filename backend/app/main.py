@@ -33,6 +33,7 @@ from .realtime import manager, visitor_for_session
 from .services.brief import create_room_brief
 from .services.agent import COMMAND_PROMPTS, answer_room_prompt
 from .services.analysis import analyze_room
+from .services.voting import propose_vote
 
 
 app = FastAPI(title="RoomAI API", version="0.1.0")
@@ -106,6 +107,23 @@ class ModelRequest(BaseModel):
     model: str = Field(min_length=1, max_length=120)
 
 
+class VoteCreateRequest(BaseModel):
+    visitor_id: str
+    question: str = Field(min_length=4, max_length=300)
+    options: list[str] = Field(min_length=2, max_length=4)
+    duration_minutes: int = Field(default=5, ge=1, le=60)
+
+
+class VoteRecordRequest(BaseModel):
+    visitor_id: str
+    option_id: int
+
+
+class VoteCloseRequest(BaseModel):
+    visitor_id: str
+    owner_token: str = Field(min_length=1)
+
+
 class ReadMentionsRequest(BaseModel):
     visitor_id: str
     message_ids: list[int] | None = None
@@ -114,6 +132,8 @@ class ReadMentionsRequest(BaseModel):
 _idle_tasks: dict[str, asyncio.Task] = {}
 _analysis_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _message_rate: defaultdict[str, deque[float]] = defaultdict(deque)
+_vote_expiry_tasks: dict[int, asyncio.Task] = {}
+_vote_creation_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def create_message_record(
@@ -194,7 +214,7 @@ def pending_user_messages(session_id: str) -> int:
     return int(row["count"])
 
 
-async def publish_room_analysis(session_id: str) -> dict | None:
+async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> dict | None:
     async with _analysis_locks[session_id]:
         room = ensure_room(session_id)
         result = await analyze_room(session_id, room["model"])
@@ -209,6 +229,12 @@ async def publish_room_analysis(session_id: str) -> dict | None:
         await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
         ideas = get_ideas_for_event(session_id)
         await manager.broadcast(session_id, {"type": "idea_update", "ideas": ideas})
+        disagreements = result["summary"].get("disagreements", [])
+        if auto_vote and disagreements:
+            detail = "讨论分析识别到以下分歧，请围绕这些真实观点拟定中立投票：\n" + "\n".join(
+                f"- {item}" for item in disagreements[:4]
+            )
+            asyncio.create_task(create_ai_vote(session_id, detail))
         return result
 
 
@@ -229,6 +255,144 @@ def get_ideas_for_event(session_id: str) -> list[dict]:
         item["average_score"] = round(sum(scores) / len(scores), 1) if scores else None
         ideas.append(item)
     return ideas
+
+
+def vote_state(session_id: str, vote_id: int, visitor_id: str | None = None) -> dict | None:
+    with database() as connection:
+        vote = connection.execute(
+            "SELECT * FROM votes WHERE session_id = ? AND id = ?", (session_id, vote_id)
+        ).fetchone()
+        if not vote:
+            return None
+        options = connection.execute(
+            """SELECT o.id, o.label, COUNT(r.id) AS votes
+               FROM vote_options o LEFT JOIN vote_records r ON r.option_id = o.id
+               WHERE o.vote_id = ? GROUP BY o.id ORDER BY o.id""",
+            (vote_id,),
+        ).fetchall()
+        total = sum(int(option["votes"]) for option in options)
+        my_vote = connection.execute(
+            "SELECT option_id FROM vote_records WHERE vote_id = ? AND visitor_id = ?",
+            (vote_id, visitor_id),
+        ).fetchone() if visitor_id else None
+    return {
+        "id": vote["id"],
+        "session_id": session_id,
+        "message_id": vote["message_id"],
+        "question": vote["question"],
+        "status": vote["status"],
+        "created_at": vote["created_at"],
+        "closes_at": vote["closes_at"],
+        "closed_at": vote["closed_at"],
+        "total_votes": total,
+        "my_option_id": int(my_vote["option_id"]) if my_vote else None,
+        "options": [
+            {
+                "id": option["id"],
+                "label": option["label"],
+                "votes": option["votes"],
+                "percentage": round(option["votes"] * 100 / total) if total else 0,
+            }
+            for option in options
+        ],
+    }
+
+
+async def publish_vote(session_id: str, visitor_id: str, question: str, options: list[str], duration_minutes: int = 5) -> dict:
+    question = question.strip()
+    cleaned_options = list(dict.fromkeys(item.strip()[:180] for item in options if item.strip()))[:4]
+    if len(question) < 4 or len(cleaned_options) < 2:
+        raise HTTPException(status_code=422, detail="投票问题至少需要两个不同选项")
+    created_at = now_iso()
+    closes_at = datetime.now(timezone.utc).timestamp() + duration_minutes * 60
+    closes_at_iso = datetime.fromtimestamp(closes_at, timezone.utc).isoformat()
+    message = create_message_record(session_id, None, "RoomAI", "agent", f"**发起投票**\n\n{question}", created_at)
+    with database() as connection:
+        cursor = connection.execute(
+            "INSERT INTO votes (session_id, message_id, question, closes_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            (session_id, message["id"], question, closes_at_iso, created_at),
+        )
+        vote_id = cursor.lastrowid
+        connection.executemany(
+            "INSERT INTO vote_options (vote_id, label) VALUES (?, ?)",
+            [(vote_id, label) for label in cleaned_options],
+        )
+    await manager.broadcast(session_id, {"type": "message", "message": message})
+    state = vote_state(session_id, vote_id)
+    await manager.broadcast(session_id, {"type": "vote_created", "vote": state})
+    _vote_expiry_tasks[vote_id] = asyncio.create_task(expire_vote_after(session_id, vote_id, duration_minutes * 60))
+    return vote_state(session_id, vote_id, visitor_id) or state
+
+
+async def finalize_vote(session_id: str, vote_id: int) -> dict | None:
+    with database() as connection:
+        vote = connection.execute(
+            "SELECT * FROM votes WHERE id = ? AND session_id = ?", (vote_id, session_id)
+        ).fetchone()
+        if not vote:
+            return None
+        if vote["status"] == "open":
+            options = connection.execute(
+                """SELECT o.id, o.label, COUNT(r.id) AS votes FROM vote_options o
+                   LEFT JOIN vote_records r ON r.option_id = o.id WHERE o.vote_id = ? GROUP BY o.id ORDER BY o.id""",
+                (vote_id,),
+            ).fetchall()
+            highest = max((int(option["votes"]) for option in options), default=0)
+            winners = [option["label"] for option in options if int(option["votes"]) == highest] if highest else []
+            outcome = "平票：" + "、".join(winners) if len(winners) > 1 else (winners[0] if winners else "无人投票")
+            closed_at = now_iso()
+            connection.execute("UPDATE votes SET status = 'closed', closed_at = ? WHERE id = ?", (closed_at, vote_id))
+            connection.execute(
+                "INSERT INTO decisions (session_id, title, outcome, source_vote_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                (session_id, vote["question"], outcome, vote_id, closed_at),
+            )
+    _vote_expiry_tasks.pop(vote_id, None)
+    state = vote_state(session_id, vote_id)
+    if state:
+        await manager.broadcast(session_id, {"type": "vote_update", "vote": state})
+    return state
+
+
+async def expire_vote_after(session_id: str, vote_id: int, delay_seconds: int) -> None:
+    try:
+        await asyncio.sleep(max(0, delay_seconds))
+        await finalize_vote(session_id, vote_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return
+    finally:
+        _vote_expiry_tasks.pop(vote_id, None)
+
+
+async def create_ai_vote(session_id: str, detail: str = "") -> None:
+    try:
+        async with _vote_creation_locks[session_id]:
+            with database() as connection:
+                active_vote = connection.execute(
+                    "SELECT 1 FROM votes WHERE session_id = ? AND status = 'open' LIMIT 1", (session_id,)
+                ).fetchone()
+                if active_vote:
+                    return
+                rows = connection.execute(
+                    "SELECT sender_name, content FROM messages WHERE session_id = ? AND is_recalled = 0 ORDER BY id DESC LIMIT 30",
+                    (session_id,),
+                ).fetchall()
+                summary = connection.execute(
+                    "SELECT content FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
+                ).fetchone()
+            room = ensure_room(session_id)
+            history = [dict(row) for row in reversed(rows)]
+            if summary:
+                history.insert(0, {"sender_name": "RoomAI 总结", "content": summary["content"]})
+            result = await propose_vote(room["topic"], history, model=room["model"], session_id=session_id, detail=detail)
+            if result:
+                await publish_vote(session_id, "", result["question"], result["options"])
+            else:
+                message = create_message_record(session_id, None, "RoomAI", "agent", "我还没找到足够清晰的投票选项。请先把需要决定的问题和各方方案说具体一些。", now_iso())
+                await manager.broadcast(session_id, {"type": "message", "message": message})
+    except Exception:
+        return
 
 
 async def _wait_and_analyze(session_id: str) -> None:
@@ -257,8 +421,15 @@ def schedule_room_analysis(session_id: str) -> None:
 
 
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
     initialize_database()
+    with database() as connection:
+        open_votes = connection.execute(
+            "SELECT id, session_id, closes_at FROM votes WHERE status = 'open' AND closes_at IS NOT NULL"
+        ).fetchall()
+    for vote in open_votes:
+        remaining = max(0, int((datetime.fromisoformat(vote["closes_at"]) - datetime.now(timezone.utc)).total_seconds()))
+        _vote_expiry_tasks[vote["id"]] = asyncio.create_task(expire_vote_after(vote["session_id"], vote["id"], remaining))
 
 
 @app.get("/api/health")
@@ -474,6 +645,64 @@ def get_usage(session_id: str, visitor_id: str) -> dict:
     }
 
 
+@app.get("/api/rooms/{session_id}/votes")
+def get_votes(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    with database() as connection:
+        rows = connection.execute("SELECT id FROM votes WHERE session_id = ? ORDER BY id", (session_id,)).fetchall()
+    return {"votes": [vote_state(session_id, row["id"], visitor_id) for row in rows]}
+
+
+@app.post("/api/rooms/{session_id}/votes")
+async def create_vote(session_id: str, payload: VoteCreateRequest) -> dict:
+    ensure_visitor(session_id, payload.visitor_id)
+    vote = await publish_vote(session_id, payload.visitor_id, payload.question, payload.options, payload.duration_minutes)
+    return {"vote": vote}
+
+
+@app.post("/api/rooms/{session_id}/votes/{vote_id}/records")
+async def cast_vote(session_id: str, vote_id: int, payload: VoteRecordRequest) -> dict:
+    ensure_visitor(session_id, payload.visitor_id)
+    with database() as connection:
+        vote = connection.execute("SELECT * FROM votes WHERE id = ? AND session_id = ?", (vote_id, session_id)).fetchone()
+        option = connection.execute("SELECT id FROM vote_options WHERE id = ? AND vote_id = ?", (payload.option_id, vote_id)).fetchone()
+        if not vote or not option:
+            raise HTTPException(status_code=404, detail="找不到这张投票卡或选项")
+        if vote["status"] != "open":
+            raise HTTPException(status_code=409, detail="投票已经结束")
+        if vote["closes_at"] and datetime.fromisoformat(vote["closes_at"]) <= datetime.now(timezone.utc):
+            expired = True
+        else:
+            expired = False
+        if not expired:
+            connection.execute(
+                """INSERT INTO vote_records (vote_id, visitor_id, option_id, updated_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(vote_id, visitor_id) DO UPDATE SET option_id = excluded.option_id, updated_at = excluded.updated_at""",
+                (vote_id, payload.visitor_id, payload.option_id, now_iso()),
+            )
+    if expired:
+        await finalize_vote(session_id, vote_id)
+        raise HTTPException(status_code=409, detail="投票时间已结束")
+    shared_state = vote_state(session_id, vote_id)
+    await manager.broadcast(session_id, {"type": "vote_update", "vote": shared_state})
+    return {"vote": vote_state(session_id, vote_id, payload.visitor_id)}
+
+
+@app.post("/api/rooms/{session_id}/votes/{vote_id}/close")
+async def close_vote(session_id: str, vote_id: int, payload: VoteCloseRequest) -> dict:
+    visitor = ensure_visitor(session_id, payload.visitor_id)
+    room = ensure_room(session_id)
+    if not visitor["is_owner"] or token_hash(payload.owner_token) != room["owner_token_hash"]:
+        raise HTTPException(status_code=403, detail="只有房主可以结束投票")
+    task = _vote_expiry_tasks.pop(vote_id, None)
+    if task and not task.done():
+        task.cancel()
+    state = await finalize_vote(session_id, vote_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="找不到这张投票卡")
+    return {"vote": state}
+
+
 @app.get("/api/rooms/{session_id}/search")
 def search_room(session_id: str, visitor_id: str, q: str = Query(min_length=1, max_length=100)) -> dict:
     ensure_visitor(session_id, visitor_id)
@@ -503,6 +732,67 @@ def search_room(session_id: str, visitor_id: str, q: str = Query(min_length=1, m
         results.append({"type": "summary", "id": row["id"], "title": f"讨论总结 v{row['id']}", "excerpt": "；".join(data.get("consensus", [])), "created_at": row["created_at"], "source_message_id": None})
     results.sort(key=lambda item: item["created_at"], reverse=True)
     return {"results": results[:50]}
+
+
+@app.get("/api/rooms/{session_id}/replay")
+def get_replay(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    room = ensure_room(session_id)
+    events = []
+    with database() as connection:
+        messages = connection.execute(
+            "SELECT id, sender_name, sender_type, content, is_recalled, created_at FROM messages WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        summaries = connection.execute(
+            "SELECT version, content, through_message_id, created_at FROM summaries WHERE session_id = ? ORDER BY version",
+            (session_id,),
+        ).fetchall()
+        ideas = connection.execute(
+            "SELECT id, title, description, source_message_id, created_at FROM ideas WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        evaluations = connection.execute(
+            """SELECT e.id, e.dimensions, e.rationale, e.created_at, i.title, i.source_message_id
+               FROM evaluations e JOIN ideas i ON i.id = e.idea_id WHERE i.session_id = ? ORDER BY e.id""",
+            (session_id,),
+        ).fetchall()
+        votes = connection.execute(
+            """SELECT v.id, v.question, v.status, v.message_id, v.created_at, v.closed_at,
+                      d.outcome FROM votes v LEFT JOIN decisions d ON d.source_vote_id = v.id
+               WHERE v.session_id = ? ORDER BY v.id""",
+            (session_id,),
+        ).fetchall()
+        todos = connection.execute(
+            "SELECT id, title, assignee, status, source_message_id, created_at FROM todos WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        decisions = connection.execute(
+            "SELECT id, title, outcome, created_at FROM decisions WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+    for item in messages:
+        detail = "这条消息已撤回" if item["is_recalled"] else (item["content"] or "图片附件")
+        events.append({"id": f"message-{item['id']}", "type": "message", "title": f"{item['sender_name']} 发言", "detail": detail[:500], "created_at": item["created_at"], "message_id": item["id"]})
+    for item in summaries:
+        content = json.loads(item["content"])
+        detail = "；".join(content.get("consensus", [])) or "总结已更新"
+        events.append({"id": f"summary-{item['version']}", "type": "summary", "title": f"滚动总结 v{item['version']}", "detail": detail[:500], "created_at": item["created_at"], "message_id": item["through_message_id"] or None})
+    for item in ideas:
+        events.append({"id": f"idea-{item['id']}", "type": "idea", "title": f"新增想法：{item['title']}", "detail": item["description"], "created_at": item["created_at"], "message_id": item["source_message_id"]})
+    for item in evaluations:
+        dimensions = json.loads(item["dimensions"] or "{}")
+        score = round(sum(dimensions.values()) / len(dimensions), 1) if dimensions else None
+        detail = f"六维平均分 {score}/5。{item['rationale']}" if score is not None else item["rationale"]
+        events.append({"id": f"evaluation-{item['id']}", "type": "evaluation", "title": f"评估想法：{item['title']}", "detail": detail, "created_at": item["created_at"], "message_id": item["source_message_id"]})
+    for item in votes:
+        events.append({"id": f"vote-{item['id']}", "type": "vote", "title": f"投票：{item['question']}", "detail": item["outcome"] or ("投票已结束" if item["status"] == "closed" else "投票进行中"), "created_at": item["created_at"], "message_id": item["message_id"]})
+    for item in todos:
+        events.append({"id": f"todo-{item['id']}", "type": "todo", "title": f"待办：{item['title']}", "detail": f"负责人：{item['assignee']}" if item["assignee"] else item["status"], "created_at": item["created_at"], "message_id": item["source_message_id"]})
+    for item in decisions:
+        events.append({"id": f"decision-{item['id']}", "type": "decision", "title": f"决策：{item['title']}", "detail": item["outcome"], "created_at": item["created_at"], "message_id": None})
+    events.sort(key=lambda event: event["created_at"])
+    return {"topic": room["topic"], "events": events}
 
 
 @app.get("/api/rooms/{session_id}/mentions")
@@ -574,12 +864,18 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
     await manager.broadcast(session_id, {"type": "message", "message": message})
     schedule_room_analysis(session_id)
     prompt = ai_prompt(content)
+    is_vote_request = content.startswith("/投票") or (
+        re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE) and "投票" in content
+    )
     is_summary_request = content.startswith(("/总结", "/评估")) or (
         re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE)
-        and re.search(r"总结|梳理共识|评估想法", content)
+        and re.search(r"总结|梳理共识|评估", content)
     )
-    if is_summary_request:
-        asyncio.create_task(publish_room_analysis(session_id))
+    if is_vote_request:
+        detail = content[len("/投票"):].strip() if content.startswith("/投票") else content
+        asyncio.create_task(create_ai_vote(session_id, detail))
+    elif is_summary_request:
+        asyncio.create_task(publish_room_analysis(session_id, auto_vote=False))
     elif prompt:
         asyncio.create_task(generate_agent_reply(session_id, prompt))
     return message

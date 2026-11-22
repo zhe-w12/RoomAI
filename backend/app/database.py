@@ -107,6 +107,39 @@ CREATE TABLE IF NOT EXISTS usage (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_session_model ON usage(session_id, model);
+CREATE TABLE IF NOT EXISTS votes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    closes_at TEXT,
+    created_at TEXT NOT NULL,
+    closed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS vote_options (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vote_id INTEGER NOT NULL REFERENCES votes(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    idea_id INTEGER REFERENCES ideas(id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS vote_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vote_id INTEGER NOT NULL REFERENCES votes(id) ON DELETE CASCADE,
+    visitor_id TEXT NOT NULL REFERENCES visitors(visitor_id) ON DELETE CASCADE,
+    option_id INTEGER NOT NULL REFERENCES vote_options(id) ON DELETE CASCADE,
+    updated_at TEXT NOT NULL,
+    UNIQUE(vote_id, visitor_id)
+);
+CREATE INDEX IF NOT EXISTS vote_records_vote_option ON vote_records(vote_id, option_id);
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    outcome TEXT NOT NULL DEFAULT '',
+    source_vote_id INTEGER REFERENCES votes(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
