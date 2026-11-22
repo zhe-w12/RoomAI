@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Send, Settings2, Sparkles, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
 import { api, FinishReview, Identity, Idea, IdeaStatus, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
@@ -39,6 +39,21 @@ function getSpeechRecognitionConstructor() {
 
 function formatTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function localDayKey(value: string | Date) {
+  const date = value instanceof Date ? value : new Date(value);
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function formatDayDivider(value: string) {
+  const date = new Date(value);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (localDayKey(date) === localDayKey(today)) return "今天";
+  if (localDayKey(date) === localDayKey(yesterday)) return "昨天";
+  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric" }).format(date);
 }
 
 function formatFileSize(value: number) {
@@ -1085,10 +1100,13 @@ export default function RoomPage() {
             const isAgentMessage = message.sender_type === "agent" || message.sender_name === "RoomAI";
             const previous = filteredMessages[index - 1];
             const showAuthor = !previous || previous.sender_name !== message.sender_name || new Date(message.created_at).getTime() - new Date(previous.created_at).getTime() > 5 * 60 * 1000;
+            const showDateDivider = !previous || localDayKey(previous.created_at) !== localDayKey(message.created_at);
             const mentioned = !own && message.content.includes(`@${identity.nickname}`);
             const mentionSuggestion = isAgentMessage ? message.content.match(/\[\[suggest_mention:([^\]]+)\]\]\s*$/) : null;
             const visibleContent = mentionSuggestion ? message.content.replace(/\n?\[\[suggest_mention:[^\]]+\]\]\s*$/, "").trim() : message.content;
-            return <article id={`message-${message.id}`} key={message.id} className={`msg ${own ? "msg-own" : ""} ${mentioned ? "msg-mention" : ""} ${quoteFlash === message.id ? "msg-flash" : ""} ${menu?.message.id === message.id ? "msg-open" : ""}`}>
+            return <Fragment key={message.id}>
+            {showDateDivider && <div className="date-divider"><span>{formatDayDivider(message.created_at)}</span></div>}
+            <article id={`message-${message.id}`} className={`msg ${own ? "msg-own" : ""} ${mentioned ? "msg-mention" : ""} ${quoteFlash === message.id ? "msg-flash" : ""} ${menu?.message.id === message.id ? "msg-open" : ""}`}>
               <div className={`avatar msg-avatar ${isAgentMessage ? "avatar-ai" : ""}`}>{isAgentMessage ? <Sparkles size={13} /> : message.sender_name.slice(0, 1)}</div>
               <div className="msg-main">
                 {showAuthor && <div className="msg-meta"><b className={isAgentMessage ? "agent-name" : ""}>{message.sender_name}</b>{isAgentMessage && <i className="tag-ai">AI</i>}<time>{formatTime(message.created_at)}</time></div>}
@@ -1104,7 +1122,8 @@ export default function RoomPage() {
                 </div>
                 {votesByMessage.has(message.id) && <VoteCard vote={votesByMessage.get(message.id)!} isOwner={Boolean(identity.owner_token)} busy={voteBusyIds.includes(votesByMessage.get(message.id)!.id)} onVote={(voteId, optionId) => void castVote(voteId, optionId)} onClose={(voteId) => void closeVote(voteId)} />}
               </div>
-            </article>;
+            </article>
+            </Fragment>;
           })}
           {streamingMessages.filter((item) => item.content).map((item) => <article className="msg msg-agent-streaming" key={item.stream_id}>
             <div className="avatar msg-avatar avatar-ai"><Sparkles size={13} /></div>
