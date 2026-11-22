@@ -230,7 +230,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ visitor_id: identity.visitor_id, message_ids }),
     }),
-  sendMessage: (sessionId: string, payload: { visitor_id: string; content: string; reply_to_message_id?: number; image_url?: string }) =>
+  sendMessage: (sessionId: string, payload: { visitor_id: string; content: string; reply_to_message_id?: number; image_url?: string; anonymous?: boolean }) =>
     request<Message>(`/api/rooms/${sessionId}/messages`, { method: "POST", body: JSON.stringify(payload) }),
   uploadImage: async (sessionId: string, visitorId: string, file: File) => {
     const form = new FormData();

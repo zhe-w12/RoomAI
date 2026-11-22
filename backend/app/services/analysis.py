@@ -130,7 +130,8 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         "只在收敛阶段输出 decision_points，最多 5 条；发散阶段必须返回空数组。"
         "如果讨论明显跑题、停滞或关键立项信息缺失，在 guide_question 中给出一个简短、开放的追问；否则留空。"
         "当房间处于发散阶段，且已有多个清晰候选方向、讨论开始进入比较取舍时，phase_suggestion 可设为 converge；否则为 null。"
-        "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称，"
+        "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称；"
+        "如果来源消息的 sender 是‘匿名成员’，proposer_name 必须填写‘匿名成员’，绝不能猜测身份；"
         "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务，待办 source_message_id 也必须来自输入消息 id。"
         "待办应尽量关联 known_todos 中的 todo_id；只有消息里明确提到时才给负责人和截止日期，状态可为 open、done 或 dropped。"
         "只返回 JSON，格式为："
@@ -254,12 +255,15 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
                 if existing_details:
                     strengths = strengths or existing_details["strengths"]
                     tradeoffs = tradeoffs or existing_details["tradeoffs"]
-            proposer = str(raw.get("proposer_name", "")).strip()
-            if proposer not in known_member_names:
-                proposer = ""
             source_id = raw.get("source_message_id")
             if not isinstance(source_id, int) or source_id not in valid_source_ids:
                 source_id = None
+            proposer = str(raw.get("proposer_name", "")).strip()
+            source_sender = next((item["sender_name"] for item in recent if item["id"] == source_id), "")
+            if source_sender == "匿名成员":
+                proposer = "匿名成员"
+            elif proposer not in known_member_names:
+                proposer = ""
             if found:
                 idea_id = found["id"]
                 connection.execute(

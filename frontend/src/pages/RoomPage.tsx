@@ -1,11 +1,11 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Send, Settings2, Sparkles, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Send, Settings2, Sparkles, Trash2, Undo2, X } from "lucide-react";
 import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
 
-const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
+const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/用户视角", "/待办", "/结束", "/帮助"];
 const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
 const emptyUsage: RoomUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_estimate: 0, cost_configured: false };
 
@@ -86,6 +86,7 @@ export default function RoomPage() {
   const [prepOpen, setPrepOpen] = useState(true);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [composerValue, setComposerValue] = useState("");
+  const [anonymousSubmission, setAnonymousSubmission] = useState(false);
   const [draftHydrated, setDraftHydrated] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
@@ -476,6 +477,11 @@ export default function RoomPage() {
 
   function handleTyping(value: string) {
     setComposerValue(value);
+    if (anonymousSubmission) {
+      sendTyping(false);
+      if (typingTimer.current) clearTimeout(typingTimer.current);
+      return;
+    }
     if (!identity) return;
     sendTyping(true);
     if (typingTimer.current) clearTimeout(typingTimer.current);
@@ -560,12 +566,14 @@ export default function RoomPage() {
       await api.sendMessage(sessionId, {
         visitor_id: identity.visitor_id,
         content: composerValue.trim(),
-        reply_to_message_id: replyTo?.id,
+        reply_to_message_id: anonymousSubmission ? undefined : replyTo?.id,
         image_url,
+        anonymous: anonymousSubmission,
       });
       setComposerValue("");
       setReplyTo(null);
       setSelectedImage(null);
+      setAnonymousSubmission(false);
       if (composerRef.current) composerRef.current.style.height = "auto";
       setNearBottom(true);
       sendTyping(false);
@@ -575,6 +583,10 @@ export default function RoomPage() {
       setSending(false);
     }
   }
+
+  useEffect(() => {
+    if (room && room.phase !== "diverge" && anonymousSubmission) setAnonymousSubmission(false);
+  }, [room?.phase, anonymousSubmission]);
 
   async function uploadRoomDocument(file?: File) {
     if (!identity || !file || documentUploading) return;
@@ -1084,17 +1096,18 @@ export default function RoomPage() {
           <form className="composer" onSubmit={(event) => void submitMessage(event)}>
             <div className="composer-tools">
               <label className={`icon-btn attach ${room.closed_at ? "disabled" : ""}`} title={room.closed_at ? "讨论已结束" : "添加图片"}><ImagePlus size={17} /><input type="file" disabled={Boolean(room.closed_at)} accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => { const file = event.target.files?.[0]; if (file && file.size <= 5 * 1024 * 1024) setSelectedImage(file); else if (file) setError("图片大小不能超过 5MB"); event.currentTarget.value = ""; }} /></label>
+              {room.phase === "diverge" && <button type="button" className={`icon-btn anonymous-toggle ${anonymousSubmission ? "anonymous-toggle-active" : ""}`} title="匿名头脑风暴；消息对全房可见，但不显示你的身份" aria-label="匿名提想法" aria-pressed={anonymousSubmission} disabled={Boolean(room.closed_at) || voiceListening} onClick={() => { const next = !anonymousSubmission; if (next) { sendTyping(false); if (typingTimer.current) clearTimeout(typingTimer.current); setSelectedImage(null); setReplyTo(null); } setAnonymousSubmission(next); }}><EyeOff size={16} /></button>}
               <button type="button" className="icon-btn" title="快捷指令" disabled={Boolean(room.closed_at) || voiceListening} onClick={() => { setComposerValue("/"); composerRef.current?.focus(); }}><Command size={16} /></button>
               <button type="button" className={`icon-btn voice-btn ${voiceListening ? "voice-listening" : ""}`} title={!voiceSupported ? "当前浏览器不支持语音识别" : voiceListening ? "结束语音输入" : "中文语音输入；部分浏览器可能会联网处理音频"} aria-label={voiceListening ? "结束语音输入" : "开始中文语音输入"} aria-pressed={voiceListening} disabled={Boolean(room.closed_at) || !voiceSupported} onClick={toggleVoiceInput}><Mic size={16} /></button>
             </div>
             <div className="composer-input">
               {showCommands && <div className="suggest suggest-cmd">{commands.filter((command) => command.startsWith(composerValue.slice(commandEnd))).map((command) => <button type="button" onClick={() => void selectCommand(command)} key={command}><span>{command}</span><small>RoomAI 快捷指令</small></button>)}</div>}
               {mentionMatch && mentionOptions.length > 0 && <div className="suggest suggest-mention"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-sm avatar-ai"><Sparkles size={12} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className="avatar avatar-sm">{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
-              <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} disabled={Boolean(room.closed_at) || voiceListening} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder={room.closed_at ? "讨论已结束" : voiceListening ? "正在聆听…点击麦克风结束后可编辑" : "说说你的想法…（输入 / 查看指令，@ 提及伙伴）"} />
+              <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} disabled={Boolean(room.closed_at) || voiceListening} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder={room.closed_at ? "讨论已结束" : voiceListening ? "正在聆听…点击麦克风结束后可编辑" : anonymousSubmission ? "写下匿名想法；所有成员都能看到内容，但看不到你的身份" : "说说你的想法…（输入 / 查看指令，@ 提及伙伴）"} />
             </div>
             <button className="send-btn" disabled={Boolean(room.closed_at) || sending || voiceListening || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={17} className="spin" /> : <Send size={16} />}</button>
           </form>
-          <div className="composer-hint"><span>{voiceListening ? "正在聆听，点击麦克风结束" : voiceSupported ? "语音识别由浏览器提供，部分浏览器可能会联网处理音频" : "图片最大 5MB"}</span><span className="composer-shortcuts"><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span></div>
+          <div className="composer-hint"><span>{anonymousSubmission ? "匿名头脑风暴：发散阶段开放，身份不会显示" : voiceListening ? "正在聆听，点击麦克风结束" : voiceSupported ? "语音识别由浏览器提供，部分浏览器可能会联网处理音频" : "图片最大 5MB"}</span><span className="composer-shortcuts"><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span></div>
         </div>
       </section>
     </section>

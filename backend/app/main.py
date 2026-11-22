@@ -145,6 +145,7 @@ class MessageRequest(BaseModel):
     content: str = Field(default="", max_length=2000)
     reply_to_message_id: int | None = None
     image_url: str | None = None
+    anonymous: bool = False
 
 
 class PhaseRequest(BaseModel):
@@ -233,6 +234,7 @@ def create_message_record(
     image_path: str | None = None,
     *,
     touch_activity: bool = True,
+    track_mentions: bool = True,
 ) -> dict:
     with database() as connection:
         cursor = connection.execute(
@@ -247,7 +249,7 @@ def create_message_record(
                 "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
                 (created_at, session_id),
             )
-        if sender_type == "user":
+        if sender_type == "user" and track_mentions:
             nicknames = connection.execute(
                 "SELECT visitor_id, nickname FROM visitors WHERE session_id = ?", (session_id,)
             ).fetchall()
@@ -1314,8 +1316,13 @@ def mark_mentions_read(session_id: str, payload: ReadMentionsRequest) -> dict:
 @app.post("/api/rooms/{session_id}/messages")
 async def post_message(session_id: str, payload: MessageRequest) -> dict:
     visitor = ensure_visitor(session_id, payload.visitor_id)
-    if ensure_room(session_id)["closed_at"]:
+    room = ensure_room(session_id)
+    if room["closed_at"]:
         raise HTTPException(status_code=409, detail="讨论已经结束，无法继续发送消息")
+    if payload.anonymous and room["phase"] != "diverge":
+        raise HTTPException(status_code=409, detail="匿名头脑风暴只在发散阶段开放")
+    if payload.anonymous and (payload.image_url or payload.reply_to_message_id is not None):
+        raise HTTPException(status_code=422, detail="匿名想法暂不支持图片或引用回复")
     content = payload.content.strip()
     image_path = None
     if payload.image_url:
@@ -1342,15 +1349,19 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
     rate.append(now_tick)
     message = create_message_record(
         session_id,
-        payload.visitor_id,
-        visitor["nickname"],
+        None if payload.anonymous else payload.visitor_id,
+        "匿名成员" if payload.anonymous else visitor["nickname"],
         "user",
-        content,
+        f"【匿名想法】{content}" if payload.anonymous else content,
         now_iso(),
-        payload.reply_to_message_id,
+        None if payload.anonymous else payload.reply_to_message_id,
         image_path,
+        track_mentions=not payload.anonymous,
     )
     await manager.broadcast(session_id, {"type": "message", "message": message})
+    if payload.anonymous:
+        asyncio.create_task(publish_room_analysis(session_id, auto_vote=False))
+        return message
     schedule_room_analysis(session_id)
     stop_red_team = re.search(r"(?:别|不要|停止|关闭).{0,6}(?:挑战|红队|质疑)", content, re.IGNORECASE)
     manual_red_team = content.startswith("/挑战") or (
@@ -1518,7 +1529,7 @@ async def generate_agent_reply(
         structured_context = json.dumps([dict(row) for row in idea_rows], ensure_ascii=False) if idea_rows else None
         answer = None
         if prompt == "__HELP__":
-            answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/联网评估 结合外部资料核对方向；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/待办提取下一步。也可以直接 @RoomAI 提问；房间资料会按问题自动检索。"
+            answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/联网评估 结合外部资料核对方向；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/用户视角 模拟目标用户的需求和顾虑；/待办提取下一步。发散阶段也可以点输入区的眼睛图标匿名提想法。也可以直接 @RoomAI 提问；房间资料会按问题自动检索。"
         else:
             references = retrieve_document_chunks(
                 session_id,
