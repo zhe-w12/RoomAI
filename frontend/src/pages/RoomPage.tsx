@@ -5,7 +5,7 @@ import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room,
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
 
-const commands = ["/总结", "/评估", "/投票", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
+const commands = ["/总结", "/评估", "/投票", "/对比", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
 const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
 const emptyUsage: RoomUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_estimate: 0, cost_configured: false };
 
@@ -589,6 +589,7 @@ export default function RoomPage() {
         <p className="summary-ver">最近更新 · v{summary.version}</p>
         <ul className="summary-list">{(summary.content.consensus.length ? summary.content.consensus : ["暂时还没有形成明确共识。"]).slice(0, 3).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul>
         {summary.content.disagreements.length > 0 && <div className="summary-sub"><b>待讨论</b><span>{summary.content.disagreements[0]}</span></div>}
+        {!!summary.content.decision_points?.length && <div className="summary-sub summary-decisions"><b>待团队拍板</b>{summary.content.decision_points.slice(0, 3).map((item, index) => <span key={`${index}-${item}`}>{item}</span>)}</div>}
         {summary.content.todos.length > 0 && <div className="summary-sub"><b>下一步</b><span>{summary.content.todos[0].title}{summary.content.todos[0].assignee ? ` · ${summary.content.todos[0].assignee}` : ""}</span></div>}
       </> : <p className="side-empty">讨论开始后，RoomAI 会在这里整理共识、分歧和待办。</p>}
 

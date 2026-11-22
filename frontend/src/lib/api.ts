@@ -41,6 +41,7 @@ export type SummaryContent = {
   todos: { title: string; assignee?: string }[];
   dimension_coverage: Record<string, boolean>;
   guide_question?: string;
+  decision_points?: string[];
   phase_suggestion?: "converge" | null;
 };
 
@@ -55,6 +56,8 @@ export type Idea = {
   id: number;
   title: string;
   description: string;
+  strengths: string;
+  tradeoffs: string;
   proposer_name: string;
   source_message_id: number | null;
   status: string;

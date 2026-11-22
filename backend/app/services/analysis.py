@@ -51,6 +51,10 @@ def _format_summary(summary: dict, version: int, ideas: list[dict]) -> str:
             lines.append(f"- {item['title']}{f'（负责人：{assignee}）' if assignee else ''}")
     if not any(isinstance(item, dict) and item.get("title") for item in todos):
         lines.append("- 暂无明确待办。")
+    decision_points = _clean_list(summary.get("decision_points"), 5)
+    if decision_points:
+        lines.extend(["", "**待团队拍板**"])
+        lines.extend(f"- {item}" for item in decision_points)
     if ideas:
         lines.extend(["", "**本轮新想法**"])
         for idea in ideas[:5]:
@@ -86,7 +90,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             "SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE session_id = ?", (session_id,)
         ).fetchone()["id"]
         existing_ideas = connection.execute(
-            """SELECT i.id, i.title, i.description, i.proposer_name,
+            """SELECT i.id, i.title, i.description, i.strengths, i.tradeoffs, i.proposer_name,
                       (SELECT e.dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions
                FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC LIMIT 20""",
             (session_id,),
@@ -122,17 +126,20 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
         f"评估维度：{dimension_guidance}。"
         "disagreements 只记录成员明确表达相反立场的具体事项；单纯未决定、缺少信息或同一立场的补充不算分歧。"
         "房间处于发散阶段时，鼓励补充方向，不急于选定方案；处于收敛阶段时，优先指出待决定事项、风险和下一步。"
+        "decision_points 只记录讨论中已经明确暴露、需要团队做出选择或确认的关键决策；不要把一般待办、风险或信息缺口当成决策。"
+        "只在收敛阶段输出 decision_points，最多 5 条；发散阶段必须返回空数组。"
         "如果讨论明显跑题、停滞或关键立项信息缺失，在 guide_question 中给出一个简短、开放的追问；否则留空。"
         "当房间处于发散阶段，且已有多个清晰候选方向、讨论开始进入比较取舍时，phase_suggestion 可设为 converge；否则为 null。"
         "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称，"
         "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务，待办 source_message_id 也必须来自输入消息 id。"
         "待办应尽量关联 known_todos 中的 todo_id；只有消息里明确提到时才给负责人和截止日期，状态可为 open、done 或 dropped。"
         "只返回 JSON，格式为："
-        '{"summary":{"consensus":["..."],"disagreements":["..."],"todos":[{"todo_id":1,"title":"...","assignee":"","status":"open","due_at":"YYYY-MM-DD","source_message_id":1}],'
+        '{"summary":{"consensus":["..."],"disagreements":["..."],"decision_points":["..."],"todos":[{"todo_id":1,"title":"...","assignee":"","status":"open","due_at":"YYYY-MM-DD","source_message_id":1}],'
         '"dimension_coverage":{"user":false,"technology":false,"time":false,"cost":false,"risk":false},"guide_question":"","phase_suggestion":null},'
         '"ideas":[{"title":"...","description":"...","proposer_name":"","source_message_id":1,"merge_into":null,'
-        f'"dimensions":{dimension_schema},"rationale":"..."}}]}}。'
+        f'"dimensions":{dimension_schema},"rationale":"...","strengths":"...","tradeoffs":"..."}}]}}。'
         "ideas 最多 5 个；没有就返回空数组。每个评分都应有简短理由，证据不足时 dimensions 返回空对象。"
+        "strengths 和 tradeoffs 分别概括讨论中有依据的优势与代价/风险；没有明确证据时返回空字符串。"
     )
     messages = [
         {"role": "system", "content": system},
@@ -192,6 +199,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             })
     raw_coverage = summary_data.get("dimension_coverage") if isinstance(summary_data.get("dimension_coverage"), dict) else {}
     guide_question = str(summary_data.get("guide_question", "")).strip()[:500]
+    decision_points = _clean_list(summary_data.get("decision_points"), 5) if room["phase"] == "converge" else []
     phase_suggestion = summary_data.get("phase_suggestion")
     if phase_suggestion != "converge" or room["phase"] != "diverge":
         phase_suggestion = None
@@ -204,6 +212,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             for key in ("user", "technology", "time", "cost", "risk")
         },
         "guide_question": guide_question,
+        "decision_points": decision_points,
         "phase_suggestion": phase_suggestion,
     }
     created_at = _now()
@@ -223,6 +232,8 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
                 continue
             title = str(raw.get("title", "")).strip()[:160]
             description = str(raw.get("description", "")).strip()[:900]
+            strengths = str(raw.get("strengths", "")).strip()[:500]
+            tradeoffs = str(raw.get("tradeoffs", "")).strip()[:500]
             if len(title) < 3 or not description:
                 continue
             merge_id = raw.get("merge_into")
@@ -236,6 +247,13 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
                     if _same_idea(title, known["title"]):
                         found = known
                         break
+            if found:
+                existing_details = connection.execute(
+                    "SELECT strengths, tradeoffs FROM ideas WHERE id = ?", (found["id"],)
+                ).fetchone()
+                if existing_details:
+                    strengths = strengths or existing_details["strengths"]
+                    tradeoffs = tradeoffs or existing_details["tradeoffs"]
             proposer = str(raw.get("proposer_name", "")).strip()
             if proposer not in known_member_names:
                 proposer = ""
@@ -245,13 +263,13 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             if found:
                 idea_id = found["id"]
                 connection.execute(
-                    "UPDATE ideas SET description = ?, updated_at = ? WHERE id = ?",
-                    (description, created_at, idea_id),
+                    "UPDATE ideas SET description = ?, strengths = ?, tradeoffs = ?, updated_at = ? WHERE id = ?",
+                    (description, strengths, tradeoffs, created_at, idea_id),
                 )
             else:
                 cursor = connection.execute(
-                    "INSERT INTO ideas (session_id, title, description, proposer_name, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (session_id, title, description, proposer, source_id, created_at, created_at),
+                    "INSERT INTO ideas (session_id, title, description, strengths, tradeoffs, proposer_name, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (session_id, title, description, strengths, tradeoffs, proposer, source_id, created_at, created_at),
                 )
                 idea_id = cursor.lastrowid
             dimensions = raw.get("dimensions") if isinstance(raw.get("dimensions"), dict) else {}

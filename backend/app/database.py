@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS ideas (
     session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    strengths TEXT NOT NULL DEFAULT '',
+    tradeoffs TEXT NOT NULL DEFAULT '',
     proposer_name TEXT NOT NULL DEFAULT '',
     source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     status TEXT NOT NULL DEFAULT 'considering',
@@ -189,3 +191,8 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE rooms ADD COLUMN red_team_enabled INTEGER NOT NULL DEFAULT 1")
         if "red_team_count" not in room_columns:
             connection.execute("ALTER TABLE rooms ADD COLUMN red_team_count INTEGER NOT NULL DEFAULT 0")
+        idea_columns = {row[1] for row in connection.execute("PRAGMA table_info(ideas)")}
+        if "strengths" not in idea_columns:
+            connection.execute("ALTER TABLE ideas ADD COLUMN strengths TEXT NOT NULL DEFAULT ''")
+        if "tradeoffs" not in idea_columns:
+            connection.execute("ALTER TABLE ideas ADD COLUMN tradeoffs TEXT NOT NULL DEFAULT ''")

@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 16959)
+Total output lines: 1416
+
 from __future__ import annotations
 
 import hashlib
@@ -21,6 +24,7 @@ from .config import (
     AVAILABLE_MODELS,
     FALLBACK_TRIGGER_MESSAGES,
     FRONTEND_ORIGIN,
+    EVALUATION_DIMENSIONS,
     IDLE_TRIGGER_MIN_MESSAGES,
     IDLE_TRIGGER_SECONDS,
     MODEL_INPUT_PRICE_PER_MILLION,
@@ -749,82 +753,7 @@ def get_todos(session_id: str, visitor_id: str) -> dict:
 @app.put("/api/rooms/{session_id}/todos/{todo_id}")
 async def update_todo(session_id: str, todo_id: int, payload: TodoUpdateRequest) -> dict:
     ensure_visitor(session_id, payload.visitor_id)
-    if ensure_room(session_id)["closed_at"]:
-        raise HTTPException(status_code=409, detail="讨论已经结束，待办已锁定")
-    title = payload.title.strip()
-    if not title:
-        raise HTTPException(status_code=422, detail="待办内容不能为空")
-    if payload.due_at:
-        try:
-            datetime.strptime(payload.due_at, "%Y-%m-%d")
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="截止日期格式应为 YYYY-MM-DD") from exc
-    with database() as connection:
-        existing = connection.execute(
-            "SELECT id FROM todos WHERE id = ? AND session_id = ?", (todo_id, session_id)
-        ).fetchone()
-        if not existing:
-            raise HTTPException(status_code=404, detail="找不到这条待办")
-        connection.execute(
-            "UPDATE todos SET title = ?, assignee = ?, status = ?, due_at = ?, updated_at = ? WHERE id = ?",
-            (title, payload.assignee.strip(), payload.status, payload.due_at or None, now_iso(), todo_id),
-        )
-    todo = next(item for item in get_room_todos(session_id) if item["id"] == todo_id)
-    todos = get_room_todos(session_id)
-    await manager.broadcast(session_id, {"type": "todo_update", "todos": todos})
-    return {"todo": todo}
-
-
-@app.get("/api/rooms/{session_id}/usage")
-def get_usage(session_id: str, visitor_id: str) -> dict:
-    ensure_visitor(session_id, visitor_id)
-    with database() as connection:
-        rows = connection.execute(
-            """SELECT model, SUM(prompt_tokens) AS prompt_tokens,
-                      SUM(completion_tokens) AS completion_tokens, SUM(cost_estimate) AS cost_estimate
-               FROM usage WHERE session_id = ? GROUP BY model ORDER BY model""",
-            (session_id,),
-        ).fetchall()
-    models = [dict(row) for row in rows]
-    return {
-        "models": models,
-        "prompt_tokens": sum(row["prompt_tokens"] for row in models),
-        "completion_tokens": sum(row["completion_tokens"] for row in models),
-        "total_tokens": sum(row["prompt_tokens"] + row["completion_tokens"] for row in models),
-        "cost_estimate": round(sum(row["cost_estimate"] for row in models), 6),
-        "cost_configured": (
-            MODEL_INPUT_PRICE_PER_MILLION > 0
-            or MODEL_OUTPUT_PRICE_PER_MILLION > 0
-            or any(row["model"] in MODEL_PRICES and any(MODEL_PRICES[row["model"]].values()) for row in models)
-        ),
-    }
-
-
-@app.get("/api/rooms/{session_id}/votes")
-def get_votes(session_id: str, visitor_id: str) -> dict:
-    ensure_visitor(session_id, visitor_id)
-    with database() as connection:
-        rows = connection.execute("SELECT id FROM votes WHERE session_id = ? ORDER BY id", (session_id,)).fetchall()
-    return {"votes": [vote_state(session_id, row["id"], visitor_id) for row in rows]}
-
-
-@app.post("/api/rooms/{session_id}/votes")
-async def create_vote(session_id: str, payload: VoteCreateRequest) -> dict:
-    ensure_visitor(session_id, payload.visitor_id)
-    if ensure_room(session_id)["closed_at"]:
-        raise HTTPException(status_code=409, detail="讨论已经结束，无法发起投票")
-    vote = await publish_vote(session_id, payload.visitor_id, payload.question, payload.options, payload.duration_minutes)
-    return {"vote": vote}
-
-
-@app.post("/api/rooms/{session_id}/votes/{vote_id}/records")
-async def cast_vote(session_id: str, vote_id: int, payload: VoteRecordRequest) -> dict:
-    ensure_visitor(session_id, payload.visitor_id)
-    if ensure_room(session_id)["closed_at"]:
-        raise HTTPException(status_code=409, detail="讨论已经结束，投票已锁定")
-    with database() as connection:
-        vote = connection.execute("SELECT * FROM votes WHERE id = ? AND session_id = ?", (vote_id, session_id)).fetchone()
-        option = connection.execute("SELECT id FROM vote_options WHERE id = ? AND vote_id = ?", (payload.option_id, vote_id)).fetchone()
+    if ensure_room(session_id)["closed_a…959 tokens truncated…_id = ?", (payload.option_id, vote_id)).fetchone()
         if not vote or not option:
             raise HTTPException(status_code=404, detail="找不到这张投票卡或选项")
         if vote["status"] != "open":
@@ -1054,6 +983,8 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         asyncio.create_task(create_ai_vote(session_id, detail))
     elif is_summary_request:
         asyncio.create_task(publish_room_analysis(session_id, auto_vote=False))
+    elif content.startswith("/对比"):
+        asyncio.create_task(publish_idea_comparison(session_id))
     elif prompt:
         asyncio.create_task(generate_agent_reply(session_id, prompt))
     return message
@@ -1070,6 +1001,62 @@ def ai_prompt(content: str) -> str | None:
     if re.search(r"@(AI|RoomAI)\b", stripped, re.IGNORECASE):
         return re.sub(r"@(AI|RoomAI)\b", "", stripped, flags=re.IGNORECASE).strip() or "请根据目前的讨论，整理共识与下一步。"
     return None
+
+
+def _comparison_cell(value) -> str:
+    return str(value or "").replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+
+async def publish_idea_comparison(session_id: str) -> None:
+    await manager.broadcast(
+        session_id,
+        {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": True},
+    )
+    try:
+        room = ensure_room(session_id)
+        if room["closed_at"]:
+            return
+        if room["phase"] != "converge":
+            answer = "方案对比表适合在收敛阶段使用。请先由房主切换到收敛阶段，再输入 `/对比`。"
+        else:
+            with database() as connection:
+                ideas = [dict(row) for row in connection.execute(
+                    """SELECT i.*,
+                              (SELECT dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions,
+                              (SELECT rationale FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS rationale,
+                              (SELECT COUNT(*) FROM idea_votes v WHERE v.idea_id = i.id AND v.stance = 'support') AS support_count,
+                              (SELECT COUNT(*) FROM idea_votes v WHERE v.idea_id = i.id AND v.stance = 'oppose') AS oppose_count
+                       FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC LIMIT 8""",
+                    (session_id,),
+                ).fetchall()]
+            if len(ideas) < 2:
+                answer = "想法池里还没有足够的候选方案。先记录至少两个方向，再输入 `/对比`。"
+            else:
+                dimensions = [item for item in EVALUATION_DIMENSIONS]
+                headers = ["方案", "说明", *[item["label"] for item in dimensions], "优势", "代价 / 风险", "评估依据", "支持 / 反对"]
+                lines = ["### 候选方案对比", "", "| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
+                for idea in ideas:
+                    scores = json.loads(idea["dimensions"] or "{}")
+                    cells = [
+                        idea["title"], idea["description"],
+                        *[f"{scores[key]}/5" if isinstance(scores.get(key), (int, float)) else "未评估" for key in (item["key"] for item in dimensions)],
+                        idea["strengths"] or "未记录",
+                        idea["tradeoffs"] or "未记录",
+                        idea["rationale"] or "未记录",
+                        f"{idea['support_count']} / {idea['oppose_count']}",
+                    ]
+                    lines.append("| " + " | ".join(_comparison_cell(value) for value in cells) + " |")
+                lines.extend(["", "评分与优势/代价来自房间已记录的评估；空缺项表示讨论中尚无明确记录。表格用于辅助讨论，不代表最终决定。"])
+                answer = "\n".join(lines)
+        message = create_message_record(session_id, None, "RoomAI", "agent", answer, now_iso())
+        await manager.broadcast(session_id, {"type": "message", "message": message})
+    except Exception:
+        return
+    finally:
+        await manager.broadcast(
+            session_id,
+            {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": False},
+        )
 
 
 async def generate_agent_reply(session_id: str, prompt: str) -> None:
@@ -1102,7 +1089,7 @@ async def generate_agent_reply(session_id: str, prompt: str) -> None:
         summary_context = json.loads(summary_row["content"]) if summary_row else None
         structured_context = json.dumps([dict(row) for row in idea_rows], ensure_ascii=False) if idea_rows else None
         if prompt == "__HELP__":
-            answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/投票整理待决定的问题；/画图生成方案流程；/挑战检查风险；/待办提取下一步。也可以直接 @RoomAI 提问。"
+            answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/待办提取下一步。也可以直接 @RoomAI 提问。"
         else:
             answer = await answer_room_prompt(
                 room["topic"], history, prompt, model=room["model"], session_id=session_id,

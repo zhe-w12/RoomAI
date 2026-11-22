@@ -72,6 +72,11 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
         idea["dimensions"] = json.loads(idea["dimensions"] or "{}")
         idea["average_score"] = _average(idea["dimensions"])
     recent_messages.reverse()
+    source_text = "\n".join(
+        [str(item.get("content") or "") for item in recent_messages]
+        + [str(item.get("title") or "") for item in todos]
+        + [str(item.get("due_at") or "") for item in todos]
+    )
     facts = {
         "topic": room["topic"],
         "participants": participants,
@@ -90,7 +95,9 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
                 "从 ideas 里选择推荐方案时只能返回已有 idea id；证据不足就返回 null 并说明待验证。"
                 "风险需包含已讨论证据与建议应对，未验证假设和下次讨论建议应具体。只返回 JSON："
                 '{"recommended_idea_id":null,"recommendation_reason":"...","risks":[{"risk":"...","evidence":"...","mitigation":"..."}],'
-                '"assumptions":["..."],"next_discussion":["..."],"retrospective":"...","mermaid":""}'
+                '"assumptions":["..."],"next_discussion":["..."],"timeline":[{"milestone":"...","target":"...","basis":"..."}],"retrospective":"...","mermaid":""}'
+                "timeline 只可整理消息或明确待办中有证据的里程碑；basis 必须摘自输入原文。没有证据就返回空数组。"
+                "target 只有在原文明确给出日期/周期时才填写原文，否则写‘待定’，不得推算或编造时间。"
             ),
         },
         {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
@@ -113,6 +120,22 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
     risks = [item for item in risks[:8] if isinstance(item, dict) and str(item.get("risk", "")).strip()]
     assumptions = _items(generated.get("assumptions"), 12)
     next_discussion = _items(generated.get("next_discussion"), 8)
+    timeline = []
+    raw_timeline = generated.get("timeline") if isinstance(generated.get("timeline"), list) else []
+    compact_source = re.sub(r"[^\w\u4e00-\u9fff]+", "", source_text.casefold())
+    for item in raw_timeline[:8]:
+        if not isinstance(item, dict):
+            continue
+        milestone = str(item.get("milestone", "")).strip()[:120]
+        basis = str(item.get("basis", "")).strip()[:260]
+        compact_basis = re.sub(r"[^\w\u4e00-\u9fff]+", "", basis.casefold())
+        if not milestone or len(compact_basis) < 5 or compact_basis not in compact_source:
+            continue
+        target = str(item.get("target", "待定")).strip()[:80] or "待定"
+        compact_target = re.sub(r"[^\w\u4e00-\u9fff]+", "", target.casefold())
+        if target != "待定" and compact_target not in compact_source:
+            target = "待定"
+        timeline.append({"milestone": milestone, "target": target, "basis": basis})
     retrospective = str(generated.get("retrospective", "")).strip()[:3000]
     diagram = str(generated.get("mermaid", "")).strip()[:6000]
     if not re.fullmatch(r"(?:flowchart|graph|mindmap|sequenceDiagram|classDiagram|stateDiagram-v2)[^\n]*[\s\S]*", diagram):
@@ -161,8 +184,13 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
         minutes.extend(f"- **{_cell(item.get('label'))}**：{_cell(item.get('question'))}" for item in missing_dimensions)
     else:
         minutes.extend(["", "## 7. 未覆盖维度", "", "本次检查未发现明显缺失的讨论维度。"])
+    minutes.extend(["", "## 8. 项目时间线（草案）", "", "| 里程碑 | 时间 | 讨论依据 |", "|---|---|---|"])
+    if timeline:
+        minutes.extend(f"| {_cell(item['milestone'])} | {_cell(item['target'])} | {_cell(item['basis'])} |" for item in timeline)
+    else:
+        minutes.append("| 暂无可验证的里程碑 | 待定 | 建议在后续讨论中明确阶段与时间 |")
     if diagram:
-        minutes.extend(["", "## 8. 方案可视化", "", "```mermaid", diagram, "```"])
+        minutes.extend(["", "## 9. 方案可视化", "", "```mermaid", diagram, "```"])
     minutes_markdown = "\n".join(minutes)
 
     retro = ["# 讨论复盘报告", "", "## 参与度", f"本次记录到 {total_messages} 条成员发言，参与人数 {len(participants)}。"]
