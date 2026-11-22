@@ -51,6 +51,7 @@ export default function RoomPage() {
   const [error, setError] = useState("");
   const [linkCopied, setLinkCopied] = useState(false);
   const [joinName, setJoinName] = useState("");
+  const [joinPassword, setJoinPassword] = useState("");
   const [joining, setJoining] = useState(false);
   const [nearBottom, setNearBottom] = useState(true);
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
@@ -180,6 +181,10 @@ export default function RoomPage() {
         if (data.type === "vote_update") setVotes((current) => current.map((vote) => vote.id === data.vote.id ? { ...vote, ...(data.vote as Vote), my_option_id: vote.my_option_id } : vote));
         if (data.type === "todo_update") setTodos(data.todos as Todo[]);
         if (data.type === "room_closed") setRoom((current) => current ? { ...current, closed_at: data.closed_at as string } : current);
+        if (data.type === "room_deleted") {
+          localStorage.removeItem(`roomai:identity:${sessionId}`);
+          navigate("/", { replace: true });
+        }
       } catch {
         // Ignore malformed events and keep the chat connection alive.
       }
@@ -214,7 +219,7 @@ export default function RoomPage() {
     setJoining(true);
     setRoomError("");
     try {
-      const joined = await api.joinByLink(sessionId, joinName.trim());
+      const joined = await api.joinByLink(sessionId, joinName.trim(), joinPassword);
       saveIdentity(joined);
       setIdentity(joined);
       const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos] = await Promise.all([
@@ -562,6 +567,7 @@ export default function RoomPage() {
       <h1>加入 RoomAI 房间</h1>
       <p className="modal-sub">填上昵称，就能看到完整的讨论记录并加入对话。</p>
       <label className="field">你的昵称<input autoFocus required maxLength={32} value={joinName} onChange={(event) => setJoinName(event.target.value)} placeholder="伙伴们怎么称呼你？" /></label>
+      <label className="field">房间密码（如有）<input type="password" autoComplete="current-password" maxLength={72} value={joinPassword} onChange={(event) => setJoinPassword(event.target.value)} placeholder="房间设置了密码时填写" /></label>
       {roomError && <p className="form-error">{roomError}</p>}
       <button className="btn btn-primary btn-block" disabled={joining}>{joining ? <><span className="btn-spinner" /> 正在加入…</> : <>进入讨论室 <ArrowRight size={16} /></>}</button>
       <a className="join-back" href="/">返回 RoomAI 首页</a>

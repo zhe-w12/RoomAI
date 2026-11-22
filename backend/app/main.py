@@ -1,17 +1,17 @@
-Warning: truncated output (original token count: 16959)
-Total output lines: 1416
-
 from __future__ import annotations
 
 import hashlib
 import asyncio
+import hmac
+import logging
 import re
 import secrets
+import shutil
 import uuid
 import json
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
@@ -31,11 +31,14 @@ from .config import (
     MODEL_NAME,
     MODEL_OUTPUT_PRICE_PER_MILLION,
     MODEL_PRICES,
+    ROOM_CLEANUP_INTERVAL_SECONDS,
+    ROOM_CLEANUP_WARNING_DAYS,
+    ROOM_RETENTION_DAYS,
     UPLOAD_DIR,
 )
 from .database import database, initialize_database
 from .realtime import manager, visitor_for_session
-from .services.brief import create_room_brief
+from .services.brief import ROOM_TEMPLATES, create_room_brief
 from .services.agent import COMMAND_PROMPTS, answer_room_prompt
 from .services.analysis import analyze_room
 from .services.report import generate_room_report, markdown_to_docx
@@ -55,6 +58,7 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 ALLOWED_IMAGES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 def now_iso() -> str:
@@ -63,6 +67,25 @@ def now_iso() -> str:
 
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def hash_room_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=32)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def room_password_matches(stored: str, password: str) -> bool:
+    if not stored:
+        return True
+    try:
+        algorithm, salt_hex, expected = stored.split("$", 2)
+        if algorithm != "scrypt":
+            return False
+        digest = hashlib.scrypt(password.encode("utf-8"), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1, dklen=32).hex()
+        return hmac.compare_digest(digest, expected)
+    except (ValueError, TypeError):
+        return False
 
 
 def ensure_room(session_id: str) -> dict:
@@ -91,15 +114,19 @@ def ensure_owner(session_id: str, visitor_id: str, owner_token: str) -> dict:
 class CreateRoomRequest(BaseModel):
     topic: str = Field(min_length=2, max_length=240)
     nickname: str = Field(min_length=1, max_length=32)
+    template_id: str = Field(default="general", max_length=40)
+    password: str | None = Field(default=None, min_length=4, max_length=72)
 
 
 class JoinRoomRequest(BaseModel):
     invite_code: str = Field(min_length=6, max_length=6)
     nickname: str = Field(min_length=1, max_length=32)
+    password: str = Field(default="", max_length=72)
 
 
 class JoinByLinkRequest(BaseModel):
     nickname: str = Field(min_length=1, max_length=32)
+    password: str = Field(default="", max_length=72)
 
 
 class MessageRequest(BaseModel):
@@ -171,6 +198,7 @@ _analysis_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _message_rate: defaultdict[str, deque[float]] = defaultdict(deque)
 _vote_expiry_tasks: dict[int, asyncio.Task] = {}
 _vote_creation_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_cleanup_task: asyncio.Task | None = None
 
 
 def create_message_record(
@@ -182,6 +210,8 @@ def create_message_record(
     created_at: str,
     reply_to_message_id: int | None = None,
     image_path: str | None = None,
+    *,
+    touch_activity: bool = True,
 ) -> dict:
     with database() as connection:
         cursor = connection.execute(
@@ -191,6 +221,11 @@ def create_message_record(
             (session_id, visitor_id, sender_name, sender_type, content, reply_to_message_id, image_path, created_at),
         )
         message_id = cursor.lastrowid
+        if sender_type == "user" and touch_activity:
+            connection.execute(
+                "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+                (created_at, session_id),
+            )
         if sender_type == "user":
             nicknames = connection.execute(
                 "SELECT visitor_id, nickname FROM visitors WHERE session_id = ?", (session_id,)
@@ -204,6 +239,14 @@ def create_message_record(
                         (message_id, session_id, member["visitor_id"], created_at),
                     )
         return get_message(connection, session_id, message_id)
+
+
+def touch_room_activity(session_id: str, at: str | None = None) -> None:
+    with database() as connection:
+        connection.execute(
+            "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (at or now_iso(), session_id),
+        )
 
 
 def get_message(connection, session_id: str, message_id: int) -> dict:
@@ -541,8 +584,98 @@ def schedule_room_analysis(session_id: str) -> None:
         _idle_tasks[session_id] = asyncio.create_task(_wait_and_analyze(session_id))
 
 
+def _safe_remove_room_uploads(session_id: str) -> None:
+    root = UPLOAD_DIR.resolve()
+    candidate = UPLOAD_DIR / session_id
+    if candidate.is_symlink():
+        candidate.unlink(missing_ok=True)
+        return
+    target = candidate.resolve()
+    if target.parent == root and target.is_dir():
+        shutil.rmtree(target)
+
+
+async def cleanup_inactive_rooms() -> None:
+    now = datetime.now(timezone.utc)
+    warning_cutoff = now - timedelta(
+        days=ROOM_RETENTION_DAYS - ROOM_CLEANUP_WARNING_DAYS
+    )
+    expiration_cutoff = now - timedelta(days=ROOM_RETENTION_DAYS)
+    with database() as connection:
+        rooms = [dict(row) for row in connection.execute(
+            "SELECT session_id, last_activity_at, cleanup_warning_sent_at FROM rooms WHERE last_activity_at IS NOT NULL"
+        ).fetchall()]
+
+    expired = []
+    warnings = []
+    for room in rooms:
+        try:
+            last_activity = datetime.fromisoformat(room["last_activity_at"])
+            if last_activity.tzinfo is None:
+                last_activity = last_activity.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            logger.warning("Skipping room with an invalid activity timestamp")
+            continue
+        if last_activity <= expiration_cutoff:
+            expired.append((room["session_id"], room["last_activity_at"]))
+        elif ROOM_CLEANUP_WARNING_DAYS and last_activity <= warning_cutoff and not room["cleanup_warning_sent_at"]:
+            warnings.append((room["session_id"], room["last_activity_at"]))
+
+    for session_id, last_activity_at in warnings:
+        warned_at = now_iso()
+        with database() as connection:
+            cursor = connection.execute(
+                "UPDATE rooms SET cleanup_warning_sent_at = ? WHERE session_id = ? AND last_activity_at = ? AND cleanup_warning_sent_at IS NULL",
+                (warned_at, session_id, last_activity_at),
+            )
+        if cursor.rowcount:
+            message = create_message_record(
+                session_id, None, "RoomAI", "agent",
+                f"**房间清理提醒**\n\n此房间已连续 {ROOM_RETENTION_DAYS - ROOM_CLEANUP_WARNING_DAYS} 天无活动；如无新活动，将在约 {ROOM_CLEANUP_WARNING_DAYS} 天后自动删除。发送新消息或更新房间内容即可保留。",
+                warned_at, touch_activity=False,
+            )
+            await manager.broadcast(session_id, {"type": "message", "message": message})
+
+    for session_id, last_activity_at in expired:
+        with database() as connection:
+            vote_ids = [row["id"] for row in connection.execute(
+                "SELECT id FROM votes WHERE session_id = ?", (session_id,)
+            ).fetchall()]
+        with database() as connection:
+            cursor = connection.execute(
+                "DELETE FROM rooms WHERE session_id = ? AND last_activity_at = ?",
+                (session_id, last_activity_at),
+            )
+        if not cursor.rowcount:
+            continue
+        await manager.broadcast(session_id, {"type": "room_deleted", "reason": "inactive"})
+        idle_task = _idle_tasks.pop(session_id, None)
+        if idle_task and not idle_task.done():
+            idle_task.cancel()
+        for vote_id in vote_ids:
+            task = _vote_expiry_tasks.pop(vote_id, None)
+            if task and not task.done():
+                task.cancel()
+        try:
+            _safe_remove_room_uploads(session_id)
+        except OSError:
+            logger.exception("Could not remove uploads for a cleaned room")
+
+
+async def room_cleanup_loop() -> None:
+    while True:
+        try:
+            await cleanup_inactive_rooms()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Room cleanup cycle failed")
+        await asyncio.sleep(ROOM_CLEANUP_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
 async def startup() -> None:
+    global _cleanup_task
     initialize_database()
     with database() as connection:
         open_votes = connection.execute(
@@ -551,11 +684,31 @@ async def startup() -> None:
     for vote in open_votes:
         remaining = max(0, int((datetime.fromisoformat(vote["closes_at"]) - datetime.now(timezone.utc)).total_seconds()))
         _vote_expiry_tasks[vote["id"]] = asyncio.create_task(expire_vote_after(vote["session_id"], vote["id"], remaining))
+    await cleanup_inactive_rooms()
+    _cleanup_task = asyncio.create_task(room_cleanup_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    if _cleanup_task and not _cleanup_task.done():
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok", "model": MODEL_NAME}
+
+
+@app.get("/api/room-templates")
+def get_room_templates() -> dict:
+    return {"templates": [
+        {key: item[key] for key in ("id", "label", "description")}
+        for item in ROOM_TEMPLATES.values()
+    ]}
 
 
 @app.post("/api/rooms")
@@ -564,6 +717,8 @@ async def create_room(payload: CreateRoomRequest) -> dict:
     nickname = payload.nickname.strip()
     if not topic or not nickname:
         raise HTTPException(status_code=422, detail="主题和昵称不能为空")
+    if payload.template_id not in ROOM_TEMPLATES:
+        raise HTTPException(status_code=422, detail="请选择有效的讨论模板")
     session_id = uuid.uuid4().hex
     owner_token = secrets.token_urlsafe(32)
     visitor_id = uuid.uuid4().hex
@@ -581,9 +736,10 @@ async def create_room(payload: CreateRoomRequest) -> dict:
         try:
             connection.execute(
                 """INSERT INTO rooms
-                   (session_id, topic, invite_code, owner_token_hash, owner_visitor_id, model, phase, prep_checklist, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'diverge', '[]', ?)""",
-                (session_id, topic, invite_code, token_hash(owner_token), visitor_id, MODEL_NAME, created_at),
+                   (session_id, topic, invite_code, owner_token_hash, owner_visitor_id, password_hash, template_id, model, phase, prep_checklist, created_at, last_activity_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'diverge', '[]', ?, ?)""",
+                (session_id, topic, invite_code, token_hash(owner_token), visitor_id,
+                 hash_room_password(payload.password) if payload.password else "", payload.template_id, MODEL_NAME, created_at, created_at),
             )
             connection.execute(
                 "INSERT INTO visitors (visitor_id, session_id, nickname, is_owner, last_seen) VALUES (?, ?, ?, 1, ?)",
@@ -592,7 +748,7 @@ async def create_room(payload: CreateRoomRequest) -> dict:
         except Exception:
             raise
 
-    brief = await create_room_brief(topic, session_id=session_id, model=MODEL_NAME)
+    brief = await create_room_brief(topic, session_id=session_id, model=MODEL_NAME, template_id=payload.template_id)
     with database() as connection:
         connection.execute(
             "UPDATE rooms SET prep_checklist = ? WHERE session_id = ?",
@@ -618,11 +774,13 @@ def join_room(payload: JoinRoomRequest) -> dict:
         raise HTTPException(status_code=422, detail="昵称不能为空")
     with database() as connection:
         room = connection.execute(
-            "SELECT session_id FROM rooms WHERE invite_code = ?", (payload.invite_code.strip(),)
+            "SELECT session_id, password_hash FROM rooms WHERE invite_code = ?", (payload.invite_code.strip(),)
         ).fetchone()
         if not room:
             raise HTTPException(status_code=404, detail="没有找到这个邀请码")
         session_id = room["session_id"]
+        if not room_password_matches(room["password_hash"], payload.password):
+            raise HTTPException(status_code=403, detail="房间密码不正确或未填写")
         duplicate = connection.execute(
             "SELECT 1 FROM visitors WHERE session_id = ? AND nickname = ? COLLATE NOCASE",
             (session_id, nickname),
@@ -630,9 +788,14 @@ def join_room(payload: JoinRoomRequest) -> dict:
         if duplicate:
             raise HTTPException(status_code=409, detail="这个房间里已经有人使用该昵称")
         visitor_id = uuid.uuid4().hex
+        activity_at = now_iso()
         connection.execute(
             "INSERT INTO visitors (visitor_id, session_id, nickname, is_owner, last_seen) VALUES (?, ?, ?, 0, ?)",
-            (visitor_id, session_id, nickname, now_iso()),
+            (visitor_id, session_id, nickname, activity_at),
+        )
+        connection.execute(
+            "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (activity_at, session_id),
         )
     return {"session_id": session_id, "visitor_id": visitor_id, "nickname": nickname}
 
@@ -642,7 +805,9 @@ def join_room_by_link(session_id: str, payload: JoinByLinkRequest) -> dict:
     nickname = payload.nickname.strip()
     if not nickname:
         raise HTTPException(status_code=422, detail="昵称不能为空")
-    ensure_room(session_id)
+    room = ensure_room(session_id)
+    if not room_password_matches(room["password_hash"], payload.password):
+        raise HTTPException(status_code=403, detail="房间密码不正确或未填写")
     with database() as connection:
         duplicate = connection.execute(
             "SELECT 1 FROM visitors WHERE session_id = ? AND nickname = ? COLLATE NOCASE",
@@ -651,9 +816,14 @@ def join_room_by_link(session_id: str, payload: JoinByLinkRequest) -> dict:
         if duplicate:
             raise HTTPException(status_code=409, detail="这个房间里已经有人使用该昵称")
         visitor_id = uuid.uuid4().hex
+        activity_at = now_iso()
         connection.execute(
             "INSERT INTO visitors (visitor_id, session_id, nickname, is_owner, last_seen) VALUES (?, ?, ?, 0, ?)",
-            (visitor_id, session_id, nickname, now_iso()),
+            (visitor_id, session_id, nickname, activity_at),
+        )
+        connection.execute(
+            "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (activity_at, session_id),
         )
     return {"session_id": session_id, "visitor_id": visitor_id, "nickname": nickname}
 
@@ -678,6 +848,7 @@ def get_room(session_id: str, visitor_id: str) -> dict:
     return {
         "session_id": room["session_id"],
         "topic": room["topic"],
+        "template_id": room["template_id"],
         "invite_code": room["invite_code"],
         "model": room["model"],
         "phase": room["phase"],
@@ -753,7 +924,88 @@ def get_todos(session_id: str, visitor_id: str) -> dict:
 @app.put("/api/rooms/{session_id}/todos/{todo_id}")
 async def update_todo(session_id: str, todo_id: int, payload: TodoUpdateRequest) -> dict:
     ensure_visitor(session_id, payload.visitor_id)
-    if ensure_room(session_id)["closed_a…959 tokens truncated…_id = ?", (payload.option_id, vote_id)).fetchone()
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，待办已锁定")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="待办内容不能为空")
+    if payload.due_at:
+        try:
+            datetime.strptime(payload.due_at, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="截止日期格式应为 YYYY-MM-DD") from exc
+    with database() as connection:
+        existing = connection.execute(
+            "SELECT id FROM todos WHERE id = ? AND session_id = ?", (todo_id, session_id)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="找不到这条待办")
+        activity_at = now_iso()
+        connection.execute(
+            "UPDATE todos SET title = ?, assignee = ?, status = ?, due_at = ?, updated_at = ? WHERE id = ?",
+            (title, payload.assignee.strip(), payload.status, payload.due_at or None, activity_at, todo_id),
+        )
+        connection.execute(
+            "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (activity_at, session_id),
+        )
+    todo = next(item for item in get_room_todos(session_id) if item["id"] == todo_id)
+    todos = get_room_todos(session_id)
+    await manager.broadcast(session_id, {"type": "todo_update", "todos": todos})
+    return {"todo": todo}
+
+
+@app.get("/api/rooms/{session_id}/usage")
+def get_usage(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    with database() as connection:
+        rows = connection.execute(
+            """SELECT model, SUM(prompt_tokens) AS prompt_tokens,
+                      SUM(completion_tokens) AS completion_tokens, SUM(cost_estimate) AS cost_estimate
+               FROM usage WHERE session_id = ? GROUP BY model ORDER BY model""",
+            (session_id,),
+        ).fetchall()
+    models = [dict(row) for row in rows]
+    return {
+        "models": models,
+        "prompt_tokens": sum(row["prompt_tokens"] for row in models),
+        "completion_tokens": sum(row["completion_tokens"] for row in models),
+        "total_tokens": sum(row["prompt_tokens"] + row["completion_tokens"] for row in models),
+        "cost_estimate": round(sum(row["cost_estimate"] for row in models), 6),
+        "cost_configured": (
+            MODEL_INPUT_PRICE_PER_MILLION > 0
+            or MODEL_OUTPUT_PRICE_PER_MILLION > 0
+            or any(row["model"] in MODEL_PRICES and any(MODEL_PRICES[row["model"]].values()) for row in models)
+        ),
+    }
+
+
+@app.get("/api/rooms/{session_id}/votes")
+def get_votes(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    with database() as connection:
+        rows = connection.execute("SELECT id FROM votes WHERE session_id = ? ORDER BY id", (session_id,)).fetchall()
+    return {"votes": [vote_state(session_id, row["id"], visitor_id) for row in rows]}
+
+
+@app.post("/api/rooms/{session_id}/votes")
+async def create_vote(session_id: str, payload: VoteCreateRequest) -> dict:
+    ensure_visitor(session_id, payload.visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，无法发起投票")
+    touch_room_activity(session_id)
+    vote = await publish_vote(session_id, payload.visitor_id, payload.question, payload.options, payload.duration_minutes)
+    return {"vote": vote}
+
+
+@app.post("/api/rooms/{session_id}/votes/{vote_id}/records")
+async def cast_vote(session_id: str, vote_id: int, payload: VoteRecordRequest) -> dict:
+    ensure_visitor(session_id, payload.visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，投票已锁定")
+    with database() as connection:
+        vote = connection.execute("SELECT * FROM votes WHERE id = ? AND session_id = ?", (vote_id, session_id)).fetchone()
+        option = connection.execute("SELECT id FROM vote_options WHERE id = ? AND vote_id = ?", (payload.option_id, vote_id)).fetchone()
         if not vote or not option:
             raise HTTPException(status_code=404, detail="找不到这张投票卡或选项")
         if vote["status"] != "open":
@@ -763,10 +1015,15 @@ async def update_todo(session_id: str, todo_id: int, payload: TodoUpdateRequest)
         else:
             expired = False
         if not expired:
+            activity_at = now_iso()
             connection.execute(
                 """INSERT INTO vote_records (vote_id, visitor_id, option_id, updated_at) VALUES (?, ?, ?, ?)
                    ON CONFLICT(vote_id, visitor_id) DO UPDATE SET option_id = excluded.option_id, updated_at = excluded.updated_at""",
-                (vote_id, payload.visitor_id, payload.option_id, now_iso()),
+                (vote_id, payload.visitor_id, payload.option_id, activity_at),
+            )
+            connection.execute(
+                "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+                (activity_at, session_id),
             )
     if expired:
         await finalize_vote(session_id, vote_id)
@@ -790,6 +1047,7 @@ async def close_vote(session_id: str, vote_id: int, payload: VoteCloseRequest) -
     state = await finalize_vote(session_id, vote_id)
     if not state:
         raise HTTPException(status_code=404, detail="找不到这张投票卡")
+    touch_room_activity(session_id)
     return {"vote": state}
 
 
@@ -1136,6 +1394,7 @@ async def upload_image(
     room_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{uuid.uuid4().hex}{extension}"
     (room_dir / filename).write_bytes(content)
+    touch_room_activity(session_id)
     return {"image_url": f"/uploads/{session_id}/{filename}"}
 
 
@@ -1179,7 +1438,10 @@ async def update_phase(session_id: str, payload: PhaseRequest) -> dict:
     if room["closed_at"]:
         raise HTTPException(status_code=409, detail="讨论已经结束")
     with database() as connection:
-        connection.execute("UPDATE rooms SET phase = ? WHERE session_id = ?", (payload.phase, session_id))
+        connection.execute(
+            "UPDATE rooms SET phase = ?, last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (payload.phase, now_iso(), session_id),
+        )
     await manager.broadcast(session_id, {"type": "phase_changed", "phase": payload.phase})
     return {"phase": payload.phase}
 
@@ -1190,7 +1452,10 @@ async def update_red_team(session_id: str, payload: RedTeamRequest) -> dict:
     if room["closed_at"]:
         raise HTTPException(status_code=409, detail="讨论已经结束")
     with database() as connection:
-        connection.execute("UPDATE rooms SET red_team_enabled = ? WHERE session_id = ?", (int(payload.enabled), session_id))
+        connection.execute(
+            "UPDATE rooms SET red_team_enabled = ?, last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (int(payload.enabled), now_iso(), session_id),
+        )
     await manager.broadcast(session_id, {"type": "red_team_setting", "enabled": payload.enabled})
     return {"enabled": payload.enabled}
 
@@ -1255,7 +1520,10 @@ async def finish_room(session_id: str, payload: FinishRoomRequest) -> dict:
                missing_dimensions = excluded.missing_dimensions, created_at = excluded.created_at""",
             (session_id, report["minutes_markdown"], report["retrospective_markdown"], json.dumps(missing, ensure_ascii=False), created_at),
         )
-        connection.execute("UPDATE rooms SET closed_at = ? WHERE session_id = ?", (created_at, session_id))
+        connection.execute(
+            "UPDATE rooms SET closed_at = ?, last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (created_at, created_at, session_id),
+        )
     await manager.broadcast(session_id, {"type": "room_closed", "closed_at": created_at})
     return {**report, "created_at": created_at, "missing_dimensions": missing}
 
@@ -1307,7 +1575,10 @@ async def update_model(session_id: str, payload: ModelRequest) -> dict:
     if payload.model not in available:
         raise HTTPException(status_code=422, detail="这个模型不在可选列表中")
     with database() as connection:
-        connection.execute("UPDATE rooms SET model = ? WHERE session_id = ?", (payload.model, session_id))
+        connection.execute(
+            "UPDATE rooms SET model = ?, last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (payload.model, now_iso(), session_id),
+        )
     await manager.broadcast(session_id, {"type": "model_changed", "model": payload.model})
     return {"model": payload.model}
 

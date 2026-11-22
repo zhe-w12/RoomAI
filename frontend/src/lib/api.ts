@@ -5,11 +5,14 @@ export type Identity = {
   owner_token?: string;
 };
 
+export type RoomTemplate = { id: string; label: string; description: string };
+
 export type Member = { visitor_id: string; nickname: string; is_owner: number };
 
 export type Room = {
   session_id: string;
   topic: string;
+  template_id: string;
   invite_code: string;
   model: string;
   available_models: string[];
@@ -129,15 +132,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  createRoom: (topic: string, nickname: string) =>
+  getRoomTemplates: () => request<{ templates: RoomTemplate[] }>("/api/room-templates"),
+  createRoom: (topic: string, nickname: string, template_id: string, password: string) =>
     request<Identity & { invite_code: string; opening_message: Message }>("/api/rooms", {
       method: "POST",
-      body: JSON.stringify({ topic, nickname }),
+      body: JSON.stringify({ topic, nickname, template_id, password: password || null }),
     }),
-  joinByCode: (invite_code: string, nickname: string) =>
-    request<Identity>("/api/rooms/join", { method: "POST", body: JSON.stringify({ invite_code, nickname }) }),
-  joinByLink: (sessionId: string, nickname: string) =>
-    request<Identity>(`/api/rooms/${sessionId}/visitors`, { method: "POST", body: JSON.stringify({ nickname }) }),
+  joinByCode: (invite_code: string, nickname: string, password: string) =>
+    request<Identity>("/api/rooms/join", { method: "POST", body: JSON.stringify({ invite_code, nickname, password }) }),
+  joinByLink: (sessionId: string, nickname: string, password: string) =>
+    request<Identity>(`/api/rooms/${sessionId}/visitors`, { method: "POST", body: JSON.stringify({ nickname, password }) }),
   getRoom: (sessionId: string, visitorId: string) =>
     request<Room>(`/api/rooms/${sessionId}?visitor_id=${encodeURIComponent(visitorId)}`),
   getMessages: (sessionId: string, visitorId: string) =>

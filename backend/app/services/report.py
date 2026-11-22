@@ -63,7 +63,7 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
             "SELECT content FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
         ).fetchone()
         recent_messages = [dict(row) for row in connection.execute(
-            "SELECT id, sender_name, content, created_at FROM messages WHERE session_id = ? AND is_recalled = 0 ORDER BY id DESC LIMIT 100",
+            "SELECT id, sender_name, sender_type, content, created_at FROM messages WHERE session_id = ? AND is_recalled = 0 ORDER BY id DESC LIMIT 100",
             (session_id,),
         ).fetchall()]
     if not room:
@@ -73,7 +73,7 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
         idea["average_score"] = _average(idea["dimensions"])
     recent_messages.reverse()
     source_text = "\n".join(
-        [str(item.get("content") or "") for item in recent_messages]
+        [str(item.get("content") or "") for item in recent_messages if item.get("sender_type") == "user"]
         + [str(item.get("title") or "") for item in todos]
         + [str(item.get("due_at") or "") for item in todos]
     )

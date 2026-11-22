@@ -1,7 +1,7 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { ArrowRight, ArrowUpRight, Plus, Sparkles, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { api, saveIdentity } from "../lib/api";
+import { api, RoomTemplate, saveIdentity } from "../lib/api";
 
 type Mode = "create" | "join" | null;
 
@@ -11,8 +11,15 @@ export default function LandingPage() {
   const [topic, setTopic] = useState("");
   const [nickname, setNickname] = useState("");
   const [inviteCode, setInviteCode] = useState("");
+  const [templateId, setTemplateId] = useState("general");
+  const [templates, setTemplates] = useState<RoomTemplate[]>([]);
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void api.getRoomTemplates().then((result) => setTemplates(result.templates)).catch(() => setTemplates([]));
+  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -20,8 +27,8 @@ export default function LandingPage() {
     setBusy(true);
     try {
       const identity = mode === "create"
-        ? await api.createRoom(topic.trim(), nickname.trim())
-        : await api.joinByCode(inviteCode.trim(), nickname.trim());
+        ? await api.createRoom(topic.trim(), nickname.trim(), templateId, password)
+        : await api.joinByCode(inviteCode.trim(), nickname.trim(), password);
       saveIdentity(identity);
       navigate(`/room/${identity.session_id}`);
     } catch (err) {
@@ -81,8 +88,13 @@ export default function LandingPage() {
           <h2>{mode === "create" ? "这次想聊什么？" : "加入团队房间"}</h2>
           <p className="modal-sub">{mode === "create" ? "定好主题，RoomAI 会帮你们从第一句话开始。" : "输入伙伴分享的 6 位邀请码，马上加入。"}</p>
           {mode === "create"
-            ? <label className="field">讨论主题<input autoFocus required minLength={2} maxLength={240} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="例如：为校园社团做一款活动管理工具" /></label>
+            ? <>
+                <label className="field">讨论主题<input autoFocus required minLength={2} maxLength={240} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="例如：为校园社团做一款活动管理工具" /></label>
+                <label className="field">讨论模板<select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{templates.map((template) => <option value={template.id} key={template.id}>{template.label}</option>)}</select><small className="field-note">{templates.find((template) => template.id === templateId)?.description}</small></label>
+                <label className="field">房间密码（可选）<input type="password" autoComplete="new-password" minLength={4} maxLength={72} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="设置后，加入房间需要输入密码" /><small className="field-note">留空时，收到邀请链接或邀请码的人都可以加入。</small></label>
+              </>
             : <label className="field">6 位邀请码<input autoFocus required inputMode="numeric" maxLength={6} value={inviteCode} onChange={(event) => setInviteCode(event.target.value.replace(/\D/g, ""))} placeholder="000000" className="invite-field" /></label>}
+          {mode === "join" && <label className="field">房间密码（如有）<input type="password" autoComplete="current-password" maxLength={72} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="房间设置了密码时填写" /></label>}
           <label className="field">你的昵称<input required maxLength={32} value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder="伙伴们怎么称呼你？" /></label>
           {error && <p className="form-error">{error}</p>}
           <button className="btn btn-primary btn-block" disabled={busy}>{busy ? <><span className="btn-spinner" /> 正在准备房间…</> : <>{mode === "create" ? "创建讨论房间" : "加入房间"} <ArrowRight size={16} /></>}</button>

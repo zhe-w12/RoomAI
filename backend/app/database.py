@@ -14,12 +14,16 @@ CREATE TABLE IF NOT EXISTS rooms (
     invite_code TEXT NOT NULL UNIQUE,
     owner_token_hash TEXT NOT NULL,
     owner_visitor_id TEXT NOT NULL,
+    password_hash TEXT NOT NULL DEFAULT '',
+    template_id TEXT NOT NULL DEFAULT 'general',
     model TEXT NOT NULL,
     phase TEXT NOT NULL DEFAULT 'diverge',
     prep_checklist TEXT NOT NULL DEFAULT '[]',
     closed_at TEXT,
     red_team_enabled INTEGER NOT NULL DEFAULT 1,
     red_team_count INTEGER NOT NULL DEFAULT 0,
+    last_activity_at TEXT,
+    cleanup_warning_sent_at TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS visitors (
@@ -191,6 +195,15 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE rooms ADD COLUMN red_team_enabled INTEGER NOT NULL DEFAULT 1")
         if "red_team_count" not in room_columns:
             connection.execute("ALTER TABLE rooms ADD COLUMN red_team_count INTEGER NOT NULL DEFAULT 0")
+        if "password_hash" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+        if "template_id" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN template_id TEXT NOT NULL DEFAULT 'general'")
+        if "last_activity_at" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN last_activity_at TEXT")
+        if "cleanup_warning_sent_at" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN cleanup_warning_sent_at TEXT")
+        connection.execute("UPDATE rooms SET last_activity_at = created_at WHERE last_activity_at IS NULL")
         idea_columns = {row[1] for row in connection.execute("PRAGMA table_info(ideas)")}
         if "strengths" not in idea_columns:
             connection.execute("ALTER TABLE ideas ADD COLUMN strengths TEXT NOT NULL DEFAULT ''")
