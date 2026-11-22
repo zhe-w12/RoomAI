@@ -43,6 +43,38 @@ MODEL_PRICES = {
     for model, prices in _raw_model_prices.items()
     if isinstance(prices, dict)
 }
+DEFAULT_EVALUATION_DIMENSIONS = [
+    {"key": "feasibility", "label": "技术可行性", "guidance": "现有技术与团队能力能否实现"},
+    {"key": "people_cost", "label": "人力成本", "guidance": "需要多少人力与资源投入"},
+    {"key": "timeline", "label": "时间周期", "guidance": "多久能交付首个可用版本"},
+    {"key": "risk", "label": "风险", "guidance": "关键不确定性与潜在风险"},
+    {"key": "innovation", "label": "创新性", "guidance": "相对已有方案的新颖之处"},
+    {"key": "team_fit", "label": "团队匹配度", "guidance": "与团队技能和资源的匹配程度"},
+]
+try:
+    _configured_dimensions = json.loads(os.getenv("EVALUATION_DIMENSIONS", "[]"))
+except json.JSONDecodeError:
+    _configured_dimensions = []
+if isinstance(_configured_dimensions, list):
+    _dimension_keys: set[str] = set()
+    EVALUATION_DIMENSIONS = []
+    for _item in _configured_dimensions[:10]:
+        if not isinstance(_item, dict):
+            continue
+        _key = str(_item.get("key", "")).strip()
+        _label = str(_item.get("label", "")).strip()
+        if not _key or not _key.replace("_", "").isalnum() or not _label or _key in _dimension_keys:
+            continue
+        _dimension_keys.add(_key)
+        EVALUATION_DIMENSIONS.append({
+            "key": _key,
+            "label": _label[:40],
+            "guidance": str(_item.get("guidance", ""))[:180],
+        })
+else:
+    EVALUATION_DIMENSIONS = []
+if not EVALUATION_DIMENSIONS:
+    EVALUATION_DIMENSIONS = DEFAULT_EVALUATION_DIMENSIONS
 IDLE_TRIGGER_SECONDS = int(os.getenv("IDLE_TRIGGER_SECONDS", "60"))
 IDLE_TRIGGER_MIN_MESSAGES = int(os.getenv("IDLE_TRIGGER_MIN_MESSAGES", "3"))
 FALLBACK_TRIGGER_MESSAGES = int(os.getenv("FALLBACK_TRIGGER_MESSAGES", "20"))

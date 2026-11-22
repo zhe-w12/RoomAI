@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS rooms (
     model TEXT NOT NULL,
     phase TEXT NOT NULL DEFAULT 'diverge',
     prep_checklist TEXT NOT NULL DEFAULT '[]',
+    closed_at TEXT,
+    red_team_enabled INTEGER NOT NULL DEFAULT 1,
+    red_team_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS visitors (
@@ -141,6 +144,14 @@ CREATE TABLE IF NOT EXISTS decisions (
     source_vote_id INTEGER REFERENCES votes(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS room_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL UNIQUE REFERENCES rooms(session_id) ON DELETE CASCADE,
+    minutes_markdown TEXT NOT NULL,
+    retrospective_markdown TEXT NOT NULL,
+    missing_dimensions TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -171,3 +182,10 @@ def initialize_database() -> None:
         todo_columns = {row[1] for row in connection.execute("PRAGMA table_info(todos)")}
         if "due_at" not in todo_columns:
             connection.execute("ALTER TABLE todos ADD COLUMN due_at TEXT")
+        room_columns = {row[1] for row in connection.execute("PRAGMA table_info(rooms)")}
+        if "closed_at" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN closed_at TEXT")
+        if "red_team_enabled" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN red_team_enabled INTEGER NOT NULL DEFAULT 1")
+        if "red_team_count" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN red_team_count INTEGER NOT NULL DEFAULT 0")

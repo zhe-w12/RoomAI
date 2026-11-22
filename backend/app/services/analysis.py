@@ -6,10 +6,11 @@ import re
 from datetime import datetime, timezone
 
 from ..database import database
+from ..config import EVALUATION_DIMENSIONS
 from .agent import complete_chat, history_message
 
 
-DIMENSIONS = ("feasibility", "people_cost", "timeline", "risk", "innovation", "team_fit")
+DIMENSIONS = tuple(item["key"] for item in EVALUATION_DIMENSIONS)
 
 
 def _now() -> str:
@@ -56,6 +57,11 @@ def _format_summary(summary: dict, version: int, ideas: list[dict]) -> str:
             score = idea.get("average_score")
             label = f" · 评估 {score:.1f}/5" if isinstance(score, (int, float)) else ""
             lines.append(f"- **{idea['title']}**{label}：{idea['description']}")
+    guide_question = str(summary.get("guide_question", "")).strip()
+    if guide_question:
+        lines.extend(["", "### 下一步引导", guide_question])
+    if summary.get("phase_suggestion") == "converge":
+        lines.extend(["", "### 阶段建议", "当前已有可比较的方向，RoomAI 建议房主考虑切换到收敛阶段。"])
     return "\n".join(lines)
 
 
@@ -95,6 +101,10 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
     if not recent and not force:
         return None
     previous = json.loads(latest_summary["content"]) if latest_summary else {}
+    dimension_schema = json.dumps({key: 3 for key in DIMENSIONS}, ensure_ascii=False)
+    dimension_guidance = "；".join(
+        f"{item['key']}（{item['label']}）：{item['guidance']}" for item in EVALUATION_DIMENSIONS
+    )
     prompt = {
         "previous_summary": previous,
         "phase": room["phase"],
@@ -108,17 +118,20 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
     }
     system = (
         "你是 RoomAI 的讨论分析员。只整理消息中真实出现的观点，不要补充事实。"
-        "从最近消息增量更新滚动总结，识别值得进入想法池的新想法，并按 1-5 分评估六个维度。"
+        "从最近消息增量更新滚动总结，识别值得进入想法池的新想法，并按 1-5 分评估配置的维度。"
+        f"评估维度：{dimension_guidance}。"
         "disagreements 只记录成员明确表达相反立场的具体事项；单纯未决定、缺少信息或同一立场的补充不算分歧。"
         "房间处于发散阶段时，鼓励补充方向，不急于选定方案；处于收敛阶段时，优先指出待决定事项、风险和下一步。"
+        "如果讨论明显跑题、停滞或关键立项信息缺失，在 guide_question 中给出一个简短、开放的追问；否则留空。"
+        "当房间处于发散阶段，且已有多个清晰候选方向、讨论开始进入比较取舍时，phase_suggestion 可设为 converge；否则为 null。"
         "known_ideas 中若有重复想法，请在 merge_into 填对应 id；新想法的 proposer_name 只能使用 member_names 中的昵称，"
         "source_message_id 必须来自输入消息 id。待办仅记录明确提到的任务，待办 source_message_id 也必须来自输入消息 id。"
         "待办应尽量关联 known_todos 中的 todo_id；只有消息里明确提到时才给负责人和截止日期，状态可为 open、done 或 dropped。"
         "只返回 JSON，格式为："
         '{"summary":{"consensus":["..."],"disagreements":["..."],"todos":[{"todo_id":1,"title":"...","assignee":"","status":"open","due_at":"YYYY-MM-DD","source_message_id":1}],'
-        '"dimension_coverage":{"user":false,"technology":false,"time":false,"cost":false,"risk":false}},'
+        '"dimension_coverage":{"user":false,"technology":false,"time":false,"cost":false,"risk":false},"guide_question":"","phase_suggestion":null},'
         '"ideas":[{"title":"...","description":"...","proposer_name":"","source_message_id":1,"merge_into":null,'
-        '"dimensions":{"feasibility":3,"people_cost":3,"timeline":3,"risk":3,"innovation":3,"team_fit":3},"rationale":"..."}]}。'
+        f'"dimensions":{dimension_schema},"rationale":"..."}}]}}。'
         "ideas 最多 5 个；没有就返回空数组。每个评分都应有简短理由，证据不足时 dimensions 返回空对象。"
     )
     messages = [
@@ -178,6 +191,10 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
                 "source_message_id": source_id,
             })
     raw_coverage = summary_data.get("dimension_coverage") if isinstance(summary_data.get("dimension_coverage"), dict) else {}
+    guide_question = str(summary_data.get("guide_question", "")).strip()[:500]
+    phase_suggestion = summary_data.get("phase_suggestion")
+    if phase_suggestion != "converge" or room["phase"] != "diverge":
+        phase_suggestion = None
     summary_data = {
         "consensus": _clean_list(summary_data.get("consensus")),
         "disagreements": _clean_list(summary_data.get("disagreements")),
@@ -186,6 +203,8 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             key: bool(raw_coverage.get(key, False))
             for key in ("user", "technology", "time", "cost", "risk")
         },
+        "guide_question": guide_question,
+        "phase_suggestion": phase_suggestion,
     }
     created_at = _now()
     saved_ideas: list[dict] = []

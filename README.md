@@ -2,13 +2,13 @@
 
 RoomAI 是一个面向小团队的立项讨论聊天室。伙伴通过邀请链接或 6 位邀请码进入房间，围绕一个主题实时讨论；RoomAI 可以生成讨论开场、准备问题，并在成员召唤时梳理讨论内容。
 
-项目按 [DESIGN.md](./DESIGN.md) 推进，目前已完成 M3，正在开发 M4。技术栈为 FastAPI + WebSocket、SQLite、React + Vite + TypeScript + Tailwind；界面优先适配手机，采用白底灰阶与细线布局。
+项目按 [DESIGN.md](./DESIGN.md) 推进，M1–M4 的 MVP 功能已实现。技术栈为 FastAPI + WebSocket、SQLite、React + Vite + TypeScript + Tailwind；界面优先适配手机，采用白底灰阶与细线布局。
 
 ## 本地运行
 
 ### 1. 配置模型
 
-复制 `.env.example` 为项目根目录下的 `.env`，填入兼容 OpenAI Chat Completions 接口的密钥。默认配置使用 `https://aiping.cn/api/v1` 和 `GLM-5.3-Flash`。`.env` 只保存在本地，不要提交到 Git。
+复制 `.env.example` 为项目根目录下的 `.env`，填入兼容 OpenAI Chat Completions 接口的密钥。默认配置使用 `https://aiping.cn/api/v1` 和 `GLM-5.3-Flash`。评估维度可通过 `EVALUATION_DIMENSIONS` JSON 数组调整。`.env` 只保存在本地，不要提交到 Git。
 
 ### 2. 启动后端
 
@@ -51,5 +51,8 @@ npm run dev
 - `/投票` 或 `@RoomAI 发起投票` 会按现有讨论生成投票卡；成员可改票，票数实时同步，房主可提前结束，5 分钟后自动结束并归档结果。
 - 讨论回放按时间展示发言、总结、想法、评估、投票、决策和待办；总结历史可查阅最近 20 个版本。
 - 分歧分析会在没有未结束投票时自动生成投票卡；房间成员可维护待办内容、负责人、状态和截止日期，修改实时同步。
+- 房主结束讨论前可检查用户、技术、时间、成本和风险维度；确认后生成可阅读的立项纪要与复盘，支持 Markdown、Word 和浏览器打印导出 PDF。
+- 收敛阶段可自动发起最多三次红队审查；房主可在设置中关闭，也可用 `/挑战` 手动调用。阶段提示、讨论引导及基于想法提出者的智能 @ 建议随消息呈现。
+- AI 生成的 Mermaid 方案图在消息和纪要中渲染，支持放大和导出 SVG；评估维度可按项目配置。
 
-结束前维度查漏、立项纪要与复盘导出、红队、方案图及智能@建议正在按 M4 实现。部署暂不纳入当前阶段。
+M5 中的讨论模板、房间密码、自动清理等建议功能暂不属于当前 MVP；部署暂不纳入当前阶段。

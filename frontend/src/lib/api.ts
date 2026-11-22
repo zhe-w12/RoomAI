@@ -18,6 +18,21 @@ export type Room = {
   members: Member[];
   unread_mentions: number;
   created_at: string;
+  closed_at: string | null;
+  red_team_enabled: boolean;
+  red_team_count: number;
+};
+
+export type RoomReport = {
+  minutes_markdown: string;
+  retrospective_markdown: string;
+  missing_dimensions: { key: string; label: string; question: string }[];
+  created_at: string;
+};
+
+export type FinishReview = {
+  coverage: Record<string, boolean>;
+  missing_dimensions: { key: string; label: string; question: string }[];
 };
 
 export type SummaryContent = {
@@ -25,6 +40,8 @@ export type SummaryContent = {
   disagreements: string[];
   todos: { title: string; assignee?: string }[];
   dimension_coverage: Record<string, boolean>;
+  guide_question?: string;
+  phase_suggestion?: "converge" | null;
 };
 
 export type SummaryVersion = {
@@ -135,6 +152,18 @@ export const api = {
     }),
   getUsage: (sessionId: string, visitorId: string) =>
     request<RoomUsage>(`/api/rooms/${sessionId}/usage?visitor_id=${encodeURIComponent(visitorId)}`),
+  reviewFinish: (sessionId: string, identity: Identity) =>
+    request<FinishReview>(`/api/rooms/${sessionId}/finish/review`, {
+      method: "POST", body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token }),
+    }),
+  finishRoom: (sessionId: string, identity: Identity, missing_dimensions: string[]) =>
+    request<RoomReport>(`/api/rooms/${sessionId}/finish`, {
+      method: "POST", body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, missing_dimensions }),
+    }),
+  getRoomReport: (sessionId: string, visitorId: string) =>
+    request<RoomReport>(`/api/rooms/${sessionId}/report?visitor_id=${encodeURIComponent(visitorId)}`),
+  roomReportExportUrl: (sessionId: string, visitorId: string, format: "md" | "docx") =>
+    `${API_BASE}/api/rooms/${sessionId}/report/export.${format}?visitor_id=${encodeURIComponent(visitorId)}`,
   getVotes: (sessionId: string, visitorId: string) =>
     request<{ votes: import("../components/VoteCard").Vote[] }>(`/api/rooms/${sessionId}/votes?visitor_id=${encodeURIComponent(visitorId)}`),
   castVote: (sessionId: string, voteId: number, visitorId: string, optionId: number) =>
@@ -173,6 +202,10 @@ export const api = {
     request<{ model: string }>(`/api/rooms/${sessionId}/model`, {
       method: "PUT",
       body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, model }),
+    }),
+  setRedTeam: (sessionId: string, identity: Identity, enabled: boolean) =>
+    request<{ enabled: boolean }>(`/api/rooms/${sessionId}/red-team`, {
+      method: "PUT", body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, enabled }),
     }),
   imageUrl: (path: string) => `${API_BASE}${path}`,
   socketUrl: (sessionId: string, visitorId: string) => {

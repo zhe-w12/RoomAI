@@ -1,11 +1,13 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
-import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, History, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Undo2, X } from "lucide-react";
-import { api, Identity, Idea, loadIdentity, Member, Message, Room, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
+import { useNavigate, useParams } from "react-router-dom";
+import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, FileText, History, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Undo2, X } from "lucide-react";
+import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
 
 const commands = ["/总结", "/评估", "/投票", "/画图", "/挑战", "/待办", "/结束", "/帮助"];
+const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
+const emptyUsage: RoomUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_estimate: 0, cost_configured: false };
 
 function formatTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -13,6 +15,7 @@ function formatTime(value: string) {
 
 export default function RoomPage() {
   const { sessionId = "" } = useParams();
+  const navigate = useNavigate();
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [room, setRoom] = useState<Room | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -32,6 +35,10 @@ export default function RoomPage() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [finishReviewOpen, setFinishReviewOpen] = useState(false);
+  const [finishReview, setFinishReview] = useState<FinishReview | null>(null);
+  const [finishReviewLoading, setFinishReviewLoading] = useState(false);
+  const [finishSaving, setFinishSaving] = useState(false);
   const [summaryHistoryOpen, setSummaryHistoryOpen] = useState(false);
   const [editingTodo, setEditingTodo] = useState<Todo | null>(null);
   const [todoSaving, setTodoSaving] = useState(false);
@@ -89,7 +96,7 @@ export default function RoomPage() {
           api.getMentions(sessionId, storedIdentity.visitor_id),
           api.getSummary(sessionId, storedIdentity.visitor_id),
           api.getIdeas(sessionId, storedIdentity.visitor_id),
-          api.getUsage(sessionId, storedIdentity.visitor_id),
+          api.getUsage(sessionId, storedIdentity.visitor_id).catch(() => emptyUsage),
           api.getVotes(sessionId, storedIdentity.visitor_id),
           api.getTodos(sessionId, storedIdentity.visitor_id),
         ]);
@@ -156,6 +163,7 @@ export default function RoomPage() {
         }
         if (data.type === "phase_changed") setRoom((current) => current ? { ...current, phase: data.phase } : current);
         if (data.type === "model_changed") setRoom((current) => current ? { ...current, model: data.model } : current);
+        if (data.type === "red_team_setting") setRoom((current) => current ? { ...current, red_team_enabled: Boolean(data.enabled) } : current);
         if (data.type === "summary_update") {
           const nextSummary = {
             version: data.summary.version,
@@ -171,6 +179,7 @@ export default function RoomPage() {
         if (data.type === "vote_created") setVotes((current) => [...current.filter((vote) => vote.id !== data.vote.id), data.vote as Vote]);
         if (data.type === "vote_update") setVotes((current) => current.map((vote) => vote.id === data.vote.id ? { ...vote, ...(data.vote as Vote), my_option_id: vote.my_option_id } : vote));
         if (data.type === "todo_update") setTodos(data.todos as Todo[]);
+        if (data.type === "room_closed") setRoom((current) => current ? { ...current, closed_at: data.closed_at as string } : current);
       } catch {
         // Ignore malformed events and keep the chat connection alive.
       }
@@ -210,7 +219,7 @@ export default function RoomPage() {
       setIdentity(joined);
       const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos] = await Promise.all([
         api.getRoom(sessionId, joined.visitor_id), api.getMessages(sessionId, joined.visitor_id), api.getMentions(sessionId, joined.visitor_id),
-        api.getSummary(sessionId, joined.visitor_id), api.getIdeas(sessionId, joined.visitor_id), api.getUsage(sessionId, joined.visitor_id),
+        api.getSummary(sessionId, joined.visitor_id), api.getIdeas(sessionId, joined.visitor_id), api.getUsage(sessionId, joined.visitor_id).catch(() => emptyUsage),
         api.getVotes(sessionId, joined.visitor_id),
         api.getTodos(sessionId, joined.visitor_id),
       ]);
@@ -244,7 +253,12 @@ export default function RoomPage() {
 
   async function submitMessage(event?: FormEvent) {
     event?.preventDefault();
-    if (!identity || sending || (!composerValue.trim() && !selectedImage)) return;
+    if (!identity || room?.closed_at || sending || (!composerValue.trim() && !selectedImage)) return;
+    if (/^\/结束(?:\s|$)/.test(composerValue.trim())) {
+      if (!identity.owner_token) setError("只有房主可以结束讨论。");
+      else await startFinishReview();
+      return;
+    }
     setSending(true);
     setError("");
     try {
@@ -351,7 +365,7 @@ export default function RoomPage() {
   }
 
   async function togglePhase() {
-    if (!room || !identity?.owner_token) return;
+    if (!room || room.closed_at || !identity?.owner_token) return;
     const phase = room.phase === "diverge" ? "converge" : "diverge";
     try {
       await api.setPhase(sessionId, identity, phase);
@@ -360,7 +374,7 @@ export default function RoomPage() {
   }
 
   async function changeModel(model: string) {
-    if (!identity || !room || !identity.owner_token || modelSaving) return;
+    if (!identity || !room || room.closed_at || !identity.owner_token || modelSaving) return;
     setModelSaving(true);
     try {
       await api.setModel(sessionId, identity, model);
@@ -369,6 +383,16 @@ export default function RoomPage() {
       setError(err instanceof Error ? err.message : "切换模型失败");
     } finally {
       setModelSaving(false);
+    }
+  }
+
+  async function toggleRedTeam() {
+    if (!identity?.owner_token || !room || room.closed_at) return;
+    try {
+      const result = await api.setRedTeam(sessionId, identity, !room.red_team_enabled);
+      setRoom((current) => current ? { ...current, red_team_enabled: result.enabled } : current);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "更新红队设置失败");
     }
   }
 
@@ -458,13 +482,61 @@ export default function RoomPage() {
   }
 
   async function selectCommand(command: string) {
+    if (command === "/结束") {
+      if (!identity?.owner_token) {
+        setError("只有房主可以结束讨论。");
+        return;
+      }
+      await startFinishReview();
+      return;
+    }
     setComposerValue(`${command} `);
     composerRef.current?.focus();
+  }
+
+  async function startFinishReview() {
+    if (!identity?.owner_token || !room || room.closed_at) return;
+    setComposerValue("");
+    setFinishReviewOpen(true);
+    setFinishReview(null);
+    setFinishReviewLoading(true);
+    setError("");
+    try {
+      setFinishReview(await api.reviewFinish(sessionId, identity));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "维度检查暂时失败，请稍后重试。");
+      setFinishReviewOpen(false);
+    } finally {
+      setFinishReviewLoading(false);
+    }
+  }
+
+  async function confirmFinishRoom() {
+    if (!identity?.owner_token || !finishReview) return;
+    setFinishSaving(true);
+    setError("");
+    try {
+      const report = await api.finishRoom(sessionId, identity, finishReview.missing_dimensions.map((item) => item.key));
+      setRoom((current) => current ? { ...current, closed_at: report.created_at } : current);
+      setFinishReviewOpen(false);
+      setSettingsOpen(false);
+      navigate(`/room/${sessionId}/memo`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "纪要生成失败，请重试。");
+    } finally {
+      setFinishSaving(false);
+    }
   }
 
   function selectMention(member: Member) {
     const current = composerValue.replace(/@[^\s@]*$/, `@${member.nickname} `);
     setComposerValue(current);
+    composerRef.current?.focus();
+  }
+
+  function insertSuggestedMention(nickname: string) {
+    if (!room?.members.some((member) => member.nickname === nickname)) return;
+    setComposerValue((current) => `${current.trim()}${current.trim() ? " " : ""}@${nickname} `);
     composerRef.current?.focus();
   }
 
@@ -521,7 +593,7 @@ export default function RoomPage() {
       </> : <p className="side-empty">讨论开始后，RoomAI 会在这里整理共识、分歧和待办。</p>}
 
       <div className="side-label-row todo-heading"><p className="side-label">待办</p><span className="count">{todos.filter((todo) => todo.status === "open").length} 未完成</span></div>
-      {todos.length ? <div className="todo-list">{todos.slice(0, 6).map((todo) => <button className={`todo-item ${todo.status !== "open" ? "todo-item-closed" : ""}`} key={todo.id} onClick={() => setEditingTodo(todo)}>
+      {todos.length ? <div className="todo-list">{todos.slice(0, 6).map((todo) => <button className={`todo-item ${todo.status !== "open" ? "todo-item-closed" : ""}`} key={todo.id} disabled={Boolean(room.closed_at)} onClick={() => setEditingTodo(todo)}>
         <span className="todo-state-mark">{todo.status === "done" ? "✓" : todo.status === "dropped" ? "–" : "○"}</span>
         <span className="todo-item-copy"><b>{todo.title}</b><small>{todo.assignee || "待分配"} · {todo.status === "open" ? "未完成" : todo.status === "done" ? "已完成" : "已取消"}{todo.due_at ? ` · ${todo.due_at} 截止` : ""}</small></span>
       </button>)}</div> : <p className="side-empty">讨论中明确的下一步会整理到这里。</p>}
@@ -532,12 +604,14 @@ export default function RoomPage() {
       </button>)}</div> : <p className="side-empty">值得做的想法，会在讨论中浮现。</p>}
 
       <p className="side-label">讨论维度</p>
-      <div className="dim-list">{[["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]].map(([label, key]) => {
+      <div className="dim-list">{dimensionLabels.map(([label, key]) => {
         const covered = Boolean(summary?.content.dimension_coverage[key]);
         return <div className={`dim-row ${covered ? "dim-done" : ""}`} key={key}><span className="dim-dot" />{label}<span>{covered ? "已讨论" : "待聊"}</span></div>;
       })}</div>
+      {summary?.content.phase_suggestion === "converge" && room.phase === "diverge" && <div className="phase-suggestion"><span>RoomAI 建议开始收敛</span><button disabled={!identity.owner_token} onClick={() => void togglePhase()}>{identity.owner_token ? "切换阶段" : "等待房主确认"}</button></div>}
 
       <a className="sidebar-replay-link" href={`/room/${sessionId}/replay`}><Clock3 size={15} /><span>讨论回放</span><ArrowRight size={13} /></a>
+      {room.closed_at && <a className="sidebar-replay-link" href={`/room/${sessionId}/memo`}><FileText size={15} /><span>立项纪要</span><ArrowRight size={13} /></a>}
       <div className="side-spacer" />
       <div className="side-me">
         <div className="avatar avatar-sm">{identity.nickname.slice(0, 1)}</div>
@@ -549,7 +623,7 @@ export default function RoomPage() {
       <header className="topbar">
         <button className="icon-btn mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="打开侧栏"><Menu size={19} /></button>
         <div className="topbar-title"><h1 title={room.topic}>{room.topic}</h1></div>
-        <button className={`phase-btn ${room.phase === "converge" ? "phase-converge" : ""}`} onClick={togglePhase} disabled={!identity.owner_token} title={identity.owner_token ? "点击切换讨论阶段" : "发散阶段"}><i />{room.phase === "diverge" ? "发散" : "收敛"}</button>
+        <button className={`phase-btn ${room.phase === "converge" ? "phase-converge" : ""}`} onClick={togglePhase} disabled={!identity.owner_token || Boolean(room.closed_at)} title={identity.owner_token ? "点击切换讨论阶段" : "发散阶段"}><i />{room.phase === "diverge" ? "发散" : "收敛"}</button>
         <div className="online" title={`${onlineMembers.length} 人在线`}><span className="online-stack">{onlineMembers.slice(0, 3).map((member) => <i key={member.visitor_id}>{member.nickname.slice(0, 1)}</i>)}</span><span>{onlineMembers.length} 在线</span></div>
         <span className="top-sep" />
         {unreadMentionIds.length > 0 && <button className="mention-badge" onClick={() => void openUnreadMention()} title="跳转到未读 @ 提醒"><AtSign size={13} /><span>{unreadMentionIds.length}</span></button>}
@@ -561,6 +635,7 @@ export default function RoomPage() {
       {searchOpen && <div className="searchbar"><Search size={16} /><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索消息或发言人…" /><span>{search ? `${filteredMessages.length} 条` : "输入关键词筛选"}</span><button className="icon-btn" onClick={() => { setSearchOpen(false); setSearch(""); }} aria-label="关闭搜索"><X size={15} /></button></div>}
 
       <section className="chat">
+        {room.closed_at && <a className="room-closed-banner" href={`/room/${sessionId}/memo`}><Check size={15} />讨论已结束，立项纪要已生成<span>查看纪要 <ArrowRight size={13} /></span></a>}
         {room.prep_checklist.length > 0 && <div className="prep">
           <button className="prep-head" onClick={() => setPrepOpen((value) => !value)}><ChevronDown size={15} className={prepOpen ? "open" : ""} />开始前想一想<span>{room.prep_checklist.length} 个问题</span></button>
           {prepOpen && <ol className="prep-body">{room.prep_checklist.map((question) => <li key={question}>{question}</li>)}</ol>}
@@ -570,19 +645,23 @@ export default function RoomPage() {
           <div className="msg-start">讨论从这里开始</div>
           {filteredMessages.map((message, index) => {
             const own = message.visitor_id === identity.visitor_id;
+            const isAgentMessage = message.sender_type === "agent" || message.sender_name === "RoomAI";
             const previous = filteredMessages[index - 1];
             const showAuthor = !previous || previous.sender_name !== message.sender_name || new Date(message.created_at).getTime() - new Date(previous.created_at).getTime() > 5 * 60 * 1000;
             const mentioned = !own && message.content.includes(`@${identity.nickname}`);
+            const mentionSuggestion = isAgentMessage ? message.content.match(/\[\[suggest_mention:([^\]]+)\]\]\s*$/) : null;
+            const visibleContent = mentionSuggestion ? message.content.replace(/\n?\[\[suggest_mention:[^\]]+\]\]\s*$/, "").trim() : message.content;
             return <article id={`message-${message.id}`} key={message.id} className={`msg ${own ? "msg-own" : ""} ${mentioned ? "msg-mention" : ""} ${quoteFlash === message.id ? "msg-flash" : ""} ${menu?.message.id === message.id ? "msg-open" : ""}`}>
-              <div className={`avatar msg-avatar ${message.sender_type === "agent" ? "avatar-ai" : ""}`}>{message.sender_type === "agent" ? <Sparkles size={13} /> : message.sender_name.slice(0, 1)}</div>
+              <div className={`avatar msg-avatar ${isAgentMessage ? "avatar-ai" : ""}`}>{isAgentMessage ? <Sparkles size={13} /> : message.sender_name.slice(0, 1)}</div>
               <div className="msg-main">
-                {showAuthor && <div className="msg-meta"><b className={message.sender_type === "agent" ? "agent-name" : ""}>{message.sender_name}</b>{message.sender_type === "agent" && <i className="tag-ai">AI</i>}<time>{formatTime(message.created_at)}</time></div>}
+                {showAuthor && <div className="msg-meta"><b className={isAgentMessage ? "agent-name" : ""}>{message.sender_name}</b>{isAgentMessage && <i className="tag-ai">AI</i>}<time>{formatTime(message.created_at)}</time></div>}
                 <div className={`msg-body ${pressingId === message.id ? "msg-pressing" : ""}`} onPointerDown={(event) => startPress(message, event)} onPointerUp={cancelPress} onPointerLeave={cancelPress} onPointerMove={handlePressMove} onContextMenu={(event) => { event.preventDefault(); if (!message.is_recalled) openMenu(message, event.clientX, event.clientY); }}>
                   {message.reply_to && <button className="quote" onClick={() => jumpToMessage(message.reply_to!.id)}><span><b>{message.reply_to.sender_name}</b><small>{message.reply_to.content}</small></span></button>}
                   {message.is_recalled ? <span className="msg-recalled">这条消息已撤回</span> : <>
-                    {message.content && (message.sender_type === "agent"
-                      ? <MarkdownContent content={message.content} />
-                      : <p className="msg-text">{message.content.split(/(@[\w\u4e00-\u9fff-]+)/g).map((part, partIndex) => part.startsWith("@") ? <mark className="mention-mark" key={partIndex}>{part}</mark> : part)}</p>)}
+                    {visibleContent && (isAgentMessage
+                      ? <MarkdownContent content={visibleContent} />
+                      : <p className="msg-text">{visibleContent.split(/(@[\w\u4e00-\u9fff-]+)/g).map((part, partIndex) => part.startsWith("@") ? <mark className="mention-mark" key={partIndex}>{part}</mark> : part)}</p>)}
+                    {mentionSuggestion && room.members.some((member) => member.nickname === mentionSuggestion[1]) && <button className="smart-mention" type="button" onClick={() => insertSuggestedMention(mentionSuggestion[1])}>建议问问 <b>@{mentionSuggestion[1]}</b> <ArrowRight size={12} /></button>}
                     {message.image_url && <button className="msg-img" onClick={() => window.open(api.imageUrl(message.image_url!), "_blank", "noopener,noreferrer")}><img src={api.imageUrl(message.image_url)} alt="讨论附件" /></button>}
                   </>}
                 </div>
@@ -621,15 +700,15 @@ export default function RoomPage() {
           {imagePreview && <div className="upload-preview"><img src={imagePreview} alt="待发送图片" /><button className="icon-btn" onClick={() => setSelectedImage(null)} aria-label="移除图片"><X size={13} /></button></div>}
           <form className="composer" onSubmit={(event) => void submitMessage(event)}>
             <div className="composer-tools">
-              <label className="icon-btn attach" title="添加图片"><ImagePlus size={17} /><input type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => { const file = event.target.files?.[0]; if (file && file.size <= 5 * 1024 * 1024) setSelectedImage(file); else if (file) setError("图片大小不能超过 5MB"); event.currentTarget.value = ""; }} /></label>
-              <button type="button" className="icon-btn" title="快捷指令" onClick={() => { setComposerValue("/"); composerRef.current?.focus(); }}><Command size={16} /></button>
+              <label className={`icon-btn attach ${room.closed_at ? "disabled" : ""}`} title={room.closed_at ? "讨论已结束" : "添加图片"}><ImagePlus size={17} /><input type="file" disabled={Boolean(room.closed_at)} accept="image/jpeg,image/png,image/webp,image/gif" onChange={(event) => { const file = event.target.files?.[0]; if (file && file.size <= 5 * 1024 * 1024) setSelectedImage(file); else if (file) setError("图片大小不能超过 5MB"); event.currentTarget.value = ""; }} /></label>
+              <button type="button" className="icon-btn" title="快捷指令" disabled={Boolean(room.closed_at)} onClick={() => { setComposerValue("/"); composerRef.current?.focus(); }}><Command size={16} /></button>
             </div>
             <div className="composer-input">
               {showCommands && <div className="suggest suggest-cmd">{commands.filter((command) => command.startsWith(composerValue.slice(commandEnd))).map((command) => <button type="button" onClick={() => void selectCommand(command)} key={command}><span>{command}</span><small>RoomAI 快捷指令</small></button>)}</div>}
               {mentionMatch && mentionOptions.length > 0 && <div className="suggest suggest-mention"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-sm avatar-ai"><Sparkles size={12} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className="avatar avatar-sm">{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
-              <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder="说说你的想法…（输入 / 查看指令，@ 提及伙伴）" />
+              <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} disabled={Boolean(room.closed_at)} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder={room.closed_at ? "讨论已结束" : "说说你的想法…（输入 / 查看指令，@ 提及伙伴）"} />
             </div>
-            <button className="send-btn" disabled={sending || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={17} className="spin" /> : <Send size={16} />}</button>
+            <button className="send-btn" disabled={Boolean(room.closed_at) || sending || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={17} className="spin" /> : <Send size={16} />}</button>
           </form>
           <div className="composer-hint"><span>图片最大 5MB</span><span><kbd>Enter</kbd> 发送 · <kbd>Shift + Enter</kbd> 换行</span></div>
         </div>
@@ -642,16 +721,40 @@ export default function RoomPage() {
         <h2 id="settings-title">设置</h2>
         <div className="settings-block">
           <label className="field" htmlFor="model-select">讨论模型</label>
-          <select id="model-select" value={room.model} disabled={!identity.owner_token || modelSaving || room.available_models.length < 2} onChange={(event) => void changeModel(event.target.value)}>
+          <select id="model-select" value={room.model} disabled={!identity.owner_token || Boolean(room.closed_at) || modelSaving || room.available_models.length < 2} onChange={(event) => void changeModel(event.target.value)}>
             {room.available_models.map((model) => <option key={model} value={model}>{model}</option>)}
           </select>
           <p className="field-note">{identity.owner_token ? "切换后仅影响之后的新调用。" : "只有房主可以切换模型。"}</p>
+        </div>
+        <div className="settings-block">
+          <p className="field">红队质疑</p>
+          <button className="red-team-setting" disabled={!identity.owner_token || Boolean(room.closed_at)} onClick={() => void toggleRedTeam()}>
+            <span><b>{room.red_team_enabled ? "已开启" : "已关闭"}</b><small>收敛阶段自动审查最多 {room.red_team_count}/3 次；也可用 /挑战 手动审查。</small></span>
+            <span className={`setting-switch ${room.red_team_enabled ? "setting-switch-on" : ""}`} aria-hidden="true"><i /></span>
+          </button>
+          {!identity.owner_token && <p className="field-note">只有房主可以修改红队设置。</p>}
         </div>
         <div className="settings-usage"><b>本次讨论用量</b><span>{(usage?.total_tokens || 0).toLocaleString("zh-CN")} tokens</span><small>{usage?.cost_configured ? `估算费用 ¥${usage.cost_estimate.toFixed(4)}` : "费用价格未配置；可在 .env 设置模型单价。"}</small></div>
         <div className="settings-block">
           <button className="btn btn-block" onClick={() => void copyInvite()}>{linkCopied ? <ClipboardCheck size={15} /> : <Clipboard size={15} />} {linkCopied ? "已复制邀请链接" : "复制邀请链接"}</button>
           <p className="field-note">房主凭证保存在当前浏览器，清除浏览器数据后将无法管理房间。</p>
         </div>
+        <div className="settings-block">
+          {room.closed_at ? <a className="btn btn-primary btn-block" href={`/room/${sessionId}/memo`}><FileText size={15} />查看立项纪要</a> : identity.owner_token ? <button className="btn btn-primary btn-block" onClick={() => void startFinishReview()}><Check size={15} />结束讨论并生成纪要</button> : <p className="field-note">只有房主可以结束讨论并生成纪要。</p>}
+        </div>
+      </section>
+    </div>}
+    {finishReviewOpen && <div className="overlay" onClick={() => !finishSaving && setFinishReviewOpen(false)}>
+      <section className="modal finish-review-modal" role="dialog" aria-modal="true" aria-labelledby="finish-review-title" onClick={(event) => event.stopPropagation()}>
+        <button className="icon-btn modal-close" onClick={() => setFinishReviewOpen(false)} aria-label="返回讨论"><X size={17} /></button>
+        <p className="eyebrow">结束前检查</p>
+        <h2 id="finish-review-title">立项维度查漏</h2>
+        <p className="modal-sub">RoomAI 已对照五个维度检查当前讨论。你可以返回继续补充，也可以确认结束并生成纪要。</p>
+        {finishReviewLoading ? <div className="finish-review-loading"><span className="btn-spinner" />正在检查讨论记录…</div> : finishReview && <>
+          <div className="finish-dimensions">{dimensionLabels.map(([label, key]) => <div className="finish-dimension" key={key}><span className={finishReview.coverage[key] ? "finish-covered" : "finish-missing"}>{finishReview.coverage[key] ? "✓" : "○"}</span><b>{label}</b><small>{finishReview.coverage[key] ? "已覆盖" : "待补充"}</small></div>)}</div>
+          {finishReview.missing_dimensions.length > 0 ? <div className="finish-missing-list"><b>纪要会附上这些待补充问题</b>{finishReview.missing_dimensions.map((item) => <p key={item.key}><strong>{item.label}</strong>{item.question}</p>)}</div> : <p className="finish-all-covered">五个立项维度均已覆盖，可以生成纪要。</p>}
+          <div className="finish-review-actions"><button className="btn" disabled={finishSaving} onClick={() => setFinishReviewOpen(false)}>返回讨论</button><button className="btn btn-primary" disabled={finishSaving} onClick={() => void confirmFinishRoom()}>{finishSaving ? <><span className="btn-spinner" />正在生成…</> : <><Check size={15} />确认结束并生成纪要</>}</button></div>
+        </>}
       </section>
     </div>}
     {editingTodo && <div className="overlay" onClick={() => setEditingTodo(null)}>

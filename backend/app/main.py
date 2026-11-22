@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -33,6 +34,7 @@ from .realtime import manager, visitor_for_session
 from .services.brief import create_room_brief
 from .services.agent import COMMAND_PROMPTS, answer_room_prompt
 from .services.analysis import analyze_room
+from .services.report import generate_room_report, markdown_to_docx
 from .services.voting import propose_vote
 
 
@@ -74,6 +76,14 @@ def ensure_visitor(session_id: str, visitor_id: str) -> dict:
     return visitor
 
 
+def ensure_owner(session_id: str, visitor_id: str, owner_token: str) -> dict:
+    visitor = ensure_visitor(session_id, visitor_id)
+    room = ensure_room(session_id)
+    if not visitor["is_owner"] or token_hash(owner_token) != room["owner_token_hash"]:
+        raise HTTPException(status_code=403, detail="只有房主可以结束讨论")
+    return room
+
+
 class CreateRoomRequest(BaseModel):
     topic: str = Field(min_length=2, max_length=240)
     nickname: str = Field(min_length=1, max_length=32)
@@ -107,6 +117,12 @@ class ModelRequest(BaseModel):
     model: str = Field(min_length=1, max_length=120)
 
 
+class RedTeamRequest(BaseModel):
+    visitor_id: str
+    owner_token: str = Field(min_length=1)
+    enabled: bool
+
+
 class VoteCreateRequest(BaseModel):
     visitor_id: str
     question: str = Field(min_length=4, max_length=300)
@@ -130,6 +146,15 @@ class TodoUpdateRequest(BaseModel):
     assignee: str = Field(default="", max_length=80)
     status: str = Field(default="open", pattern="^(open|done|dropped)$")
     due_at: str | None = Field(default=None, max_length=10)
+
+
+class FinishReviewRequest(BaseModel):
+    visitor_id: str
+    owner_token: str = Field(min_length=1)
+
+
+class FinishRoomRequest(FinishReviewRequest):
+    missing_dimensions: list[str] = Field(default_factory=list, max_length=5)
 
 
 class ReadMentionsRequest(BaseModel):
@@ -225,6 +250,8 @@ def pending_user_messages(session_id: str) -> int:
 async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> dict | None:
     async with _analysis_locks[session_id]:
         room = ensure_room(session_id)
+        if room["closed_at"]:
+            return None
         result = await analyze_room(session_id, room["model"])
         if not result:
             message = create_message_record(
@@ -244,7 +271,77 @@ async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> d
                 f"- {item}" for item in disagreements[:4]
             )
             asyncio.create_task(create_ai_vote(session_id, detail))
+        if room["phase"] == "converge" and room["red_team_enabled"] and result["ideas"]:
+            asyncio.create_task(publish_red_team(session_id, automatic=True))
         return result
+
+
+async def publish_red_team(session_id: str, detail: str = "", *, automatic: bool = False) -> None:
+    reserved = False
+    generated = False
+    if automatic:
+        with database() as connection:
+            cursor = connection.execute(
+                """UPDATE rooms SET red_team_count = red_team_count + 1
+                   WHERE session_id = ? AND closed_at IS NULL AND phase = 'converge'
+                     AND red_team_enabled = 1 AND red_team_count < 3""",
+                (session_id,),
+            )
+            reserved = cursor.rowcount == 1
+        if not reserved:
+            return
+    try:
+        room = ensure_room(session_id)
+        if room["closed_at"]:
+            return
+        if not room["red_team_enabled"]:
+            if not automatic:
+                message = create_message_record(session_id, None, "RoomAI", "agent", "红队质疑已关闭，房主可以在设置里重新开启。", now_iso())
+                await manager.broadcast(session_id, {"type": "message", "message": message})
+            return
+        if room["phase"] != "converge":
+            if not automatic:
+                message = create_message_record(session_id, None, "RoomAI", "agent", "红队审查只在收敛阶段进行，请房主切换阶段后再挑战方案。", now_iso())
+                await manager.broadcast(session_id, {"type": "message", "message": message})
+            return
+        with database() as connection:
+            history = [dict(row) for row in connection.execute(
+                "SELECT sender_name, sender_type, content, image_path, is_recalled FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 30",
+                (session_id,),
+            ).fetchall()]
+            summary_row = connection.execute(
+                "SELECT content FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
+            ).fetchone()
+            idea_rows = [dict(row) for row in connection.execute(
+                """SELECT i.id, i.title, i.description, i.proposer_name,
+                          (SELECT dimensions FROM evaluations e WHERE e.idea_id = i.id ORDER BY e.id DESC LIMIT 1) AS dimensions,
+                          (SELECT COUNT(*) FROM idea_votes iv WHERE iv.idea_id = i.id AND iv.stance = 'support') AS support_count
+                   FROM ideas i WHERE i.session_id = ? ORDER BY i.updated_at DESC LIMIT 20""",
+                (session_id,),
+            ).fetchall()]
+        history.reverse()
+        prompt = detail or (
+            "请作为红队审查团队正在收敛的方案。结合上面的真实讨论与候选想法，"
+            "只指出最重要的 1 到 2 个尚未验证的风险，用简短、克制的追问表达；"
+            "说明相关想法标题，不要编造事实或直接否定方案。"
+        )
+        summary = json.loads(summary_row["content"]) if summary_row else None
+        answer = await answer_room_prompt(
+            room["topic"], history, prompt, model=room["model"], session_id=session_id,
+            phase=room["phase"], summary=json.dumps(summary, ensure_ascii=False) if summary else None,
+            structured_context=json.dumps(idea_rows, ensure_ascii=False) if idea_rows else None,
+        )
+        if not answer:
+            raise RuntimeError("红队审查生成失败")
+        message = create_message_record(session_id, None, "RoomAI", "agent", f"**红队质疑**\n\n{answer}", now_iso())
+        await manager.broadcast(session_id, {"type": "message", "message": message})
+        generated = True
+    except Exception:
+        return
+    finally:
+        if reserved and not generated:
+            with database() as connection:
+                connection.execute("UPDATE rooms SET red_team_count = MAX(0, red_team_count - 1) WHERE session_id = ?", (session_id,))
 
 
 def get_ideas_for_event(session_id: str) -> list[dict]:
@@ -400,6 +497,8 @@ async def create_ai_vote(session_id: str, detail: str = "") -> None:
                     "SELECT content FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
                 ).fetchone()
             room = ensure_room(session_id)
+            if room["closed_at"]:
+                return
             history = [dict(row) for row in reversed(rows)]
             if summary:
                 history.insert(0, {"sender_name": "RoomAI 总结", "content": summary["content"]})
@@ -583,6 +682,9 @@ def get_room(session_id: str, visitor_id: str) -> dict:
         "members": [dict(member) for member in members],
         "unread_mentions": unread_mentions,
         "created_at": room["created_at"],
+        "closed_at": room["closed_at"],
+        "red_team_enabled": bool(room["red_team_enabled"]),
+        "red_team_count": room["red_team_count"],
     }
 
 
@@ -647,6 +749,8 @@ def get_todos(session_id: str, visitor_id: str) -> dict:
 @app.put("/api/rooms/{session_id}/todos/{todo_id}")
 async def update_todo(session_id: str, todo_id: int, payload: TodoUpdateRequest) -> dict:
     ensure_visitor(session_id, payload.visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，待办已锁定")
     title = payload.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="待办内容不能为空")
@@ -707,6 +811,8 @@ def get_votes(session_id: str, visitor_id: str) -> dict:
 @app.post("/api/rooms/{session_id}/votes")
 async def create_vote(session_id: str, payload: VoteCreateRequest) -> dict:
     ensure_visitor(session_id, payload.visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，无法发起投票")
     vote = await publish_vote(session_id, payload.visitor_id, payload.question, payload.options, payload.duration_minutes)
     return {"vote": vote}
 
@@ -714,6 +820,8 @@ async def create_vote(session_id: str, payload: VoteCreateRequest) -> dict:
 @app.post("/api/rooms/{session_id}/votes/{vote_id}/records")
 async def cast_vote(session_id: str, vote_id: int, payload: VoteRecordRequest) -> dict:
     ensure_visitor(session_id, payload.visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，投票已锁定")
     with database() as connection:
         vote = connection.execute("SELECT * FROM votes WHERE id = ? AND session_id = ?", (vote_id, session_id)).fetchone()
         option = connection.execute("SELECT id FROM vote_options WHERE id = ? AND vote_id = ?", (payload.option_id, vote_id)).fetchone()
@@ -745,6 +853,8 @@ async def close_vote(session_id: str, vote_id: int, payload: VoteCloseRequest) -
     room = ensure_room(session_id)
     if not visitor["is_owner"] or token_hash(payload.owner_token) != room["owner_token_hash"]:
         raise HTTPException(status_code=403, detail="只有房主可以结束投票")
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束")
     task = _vote_expiry_tasks.pop(vote_id, None)
     if task and not task.done():
         task.cancel()
@@ -878,6 +988,8 @@ def mark_mentions_read(session_id: str, payload: ReadMentionsRequest) -> dict:
 @app.post("/api/rooms/{session_id}/messages")
 async def post_message(session_id: str, payload: MessageRequest) -> dict:
     visitor = ensure_visitor(session_id, payload.visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，无法继续发送消息")
     content = payload.content.strip()
     image_path = None
     if payload.image_url:
@@ -914,6 +1026,21 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
     )
     await manager.broadcast(session_id, {"type": "message", "message": message})
     schedule_room_analysis(session_id)
+    stop_red_team = re.search(r"(?:别|不要|停止|关闭).{0,6}(?:挑战|红队|质疑)", content, re.IGNORECASE)
+    manual_red_team = content.startswith("/挑战") or (
+        re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE)
+        and re.search(r"挑战|红队|质疑", content)
+    )
+    if stop_red_team:
+        with database() as connection:
+            connection.execute("UPDATE rooms SET red_team_enabled = 0 WHERE session_id = ?", (session_id,))
+        await manager.broadcast(session_id, {"type": "red_team_setting", "enabled": False})
+        notice = create_message_record(session_id, None, "RoomAI", "agent", "红队自动质疑已暂停。房主可以在房间设置里重新开启。", now_iso())
+        await manager.broadcast(session_id, {"type": "message", "message": notice})
+    elif manual_red_team:
+        detail = content[len("/挑战"):].strip() if content.startswith("/挑战") else content
+        asyncio.create_task(publish_red_team(session_id, detail))
+        return message
     prompt = ai_prompt(content)
     is_vote_request = content.startswith("/投票") or (
         re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE) and "投票" in content
@@ -952,6 +1079,8 @@ async def generate_agent_reply(session_id: str, prompt: str) -> None:
     )
     try:
         room = ensure_room(session_id)
+        if room["closed_at"]:
+            return
         with database() as connection:
             history = [dict(row) for row in connection.execute(
                 """SELECT m.sender_name, m.sender_type, m.content, m.image_path, m.is_recalled,
@@ -964,8 +1093,11 @@ async def generate_agent_reply(session_id: str, prompt: str) -> None:
                 "SELECT content FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
             ).fetchone()
             idea_rows = connection.execute(
-                "SELECT title, description FROM ideas WHERE session_id = ? ORDER BY updated_at DESC LIMIT 20", (session_id,)
+                "SELECT title, description, proposer_name FROM ideas WHERE session_id = ? ORDER BY updated_at DESC LIMIT 20", (session_id,)
             ).fetchall()
+            member_names = [row["nickname"] for row in connection.execute(
+                "SELECT nickname FROM visitors WHERE session_id = ? ORDER BY rowid", (session_id,)
+            ).fetchall()]
         history.reverse()
         summary_context = json.loads(summary_row["content"]) if summary_row else None
         structured_context = json.dumps([dict(row) for row in idea_rows], ensure_ascii=False) if idea_rows else None
@@ -977,7 +1109,14 @@ async def generate_agent_reply(session_id: str, prompt: str) -> None:
                 phase=room["phase"],
                 summary=json.dumps(summary_context, ensure_ascii=False) if summary_context else None,
                 structured_context=structured_context,
+                member_names=member_names,
             )
+            if answer:
+                suggestions = re.findall(r"\[\[suggest_mention:([^\]]+)\]\]", answer)
+                selected = next((name.strip() for name in reversed(suggestions) if name.strip() in member_names), None)
+                answer = re.sub(r"\n?\[\[suggest_mention:[^\]]+\]\]\s*", "", answer).strip()
+                if selected:
+                    answer += f"\n\n[[suggest_mention:{selected}]]"
         if not answer:
             answer = "我暂时没能连上模型，请稍后重试。你也可以先继续讨论，消息会保留在房间里。"
         message = create_message_record(session_id, None, "RoomAI", "agent", answer, now_iso())
@@ -998,6 +1137,8 @@ async def upload_image(
     image: UploadFile = File(...),
 ) -> dict:
     ensure_visitor(session_id, visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，无法上传图片")
     extension = ALLOWED_IMAGES.get(image.content_type or "")
     if not extension:
         raise HTTPException(status_code=415, detail="仅支持 JPG、PNG、WebP 或 GIF 图片")
@@ -1014,6 +1155,8 @@ async def upload_image(
 @app.post("/api/rooms/{session_id}/messages/{message_id}/recall")
 async def recall_message(session_id: str, message_id: int, visitor_id: str) -> dict:
     visitor = ensure_visitor(session_id, visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束，消息已锁定")
     with database() as connection:
         row = connection.execute(
             "SELECT * FROM messages WHERE session_id = ? AND id = ?", (session_id, message_id)
@@ -1046,10 +1189,123 @@ async def update_phase(session_id: str, payload: PhaseRequest) -> dict:
     room = ensure_room(session_id)
     if not visitor["is_owner"] or token_hash(payload.owner_token) != room["owner_token_hash"]:
         raise HTTPException(status_code=403, detail="只有房主可以切换阶段")
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束")
     with database() as connection:
         connection.execute("UPDATE rooms SET phase = ? WHERE session_id = ?", (payload.phase, session_id))
     await manager.broadcast(session_id, {"type": "phase_changed", "phase": payload.phase})
     return {"phase": payload.phase}
+
+
+@app.put("/api/rooms/{session_id}/red-team")
+async def update_red_team(session_id: str, payload: RedTeamRequest) -> dict:
+    room = ensure_owner(session_id, payload.visitor_id, payload.owner_token)
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束")
+    with database() as connection:
+        connection.execute("UPDATE rooms SET red_team_enabled = ? WHERE session_id = ?", (int(payload.enabled), session_id))
+    await manager.broadcast(session_id, {"type": "red_team_setting", "enabled": payload.enabled})
+    return {"enabled": payload.enabled}
+
+
+@app.post("/api/rooms/{session_id}/finish/review")
+async def review_finish(session_id: str, payload: FinishReviewRequest) -> dict:
+    room = ensure_owner(session_id, payload.visitor_id, payload.owner_token)
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束")
+    async with _analysis_locks[session_id]:
+        result = await analyze_room(session_id, room["model"], force=True)
+    if result:
+        await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
+        await manager.broadcast(session_id, {"type": "idea_update", "ideas": get_ideas_for_event(session_id)})
+        await manager.broadcast(session_id, {"type": "todo_update", "todos": get_room_todos(session_id)})
+        summary = result["summary"]
+    else:
+        with database() as connection:
+            latest = connection.execute(
+                "SELECT content FROM summaries WHERE session_id = ? ORDER BY version DESC LIMIT 1", (session_id,)
+            ).fetchone()
+        summary = json.loads(latest["content"]) if latest else {}
+    labels = {
+        "user": ("用户", "目标用户是谁？有哪些需求证据？"),
+        "technology": ("技术", "核心技术路线是什么？团队是否具备实现能力？"),
+        "time": ("时间", "首个可用版本需要多久？关键里程碑是什么？"),
+        "cost": ("成本", "需要投入哪些人力、资金或资源？"),
+        "risk": ("风险", "最大的未验证假设和风险是什么？如何降低？"),
+    }
+    coverage = summary.get("dimension_coverage", {}) if isinstance(summary, dict) else {}
+    missing = [
+        {"key": key, "label": label, "question": question}
+        for key, (label, question) in labels.items()
+        if not coverage.get(key, False)
+    ]
+    return {"coverage": coverage, "missing_dimensions": missing}
+
+
+@app.post("/api/rooms/{session_id}/finish")
+async def finish_room(session_id: str, payload: FinishRoomRequest) -> dict:
+    room = ensure_owner(session_id, payload.visitor_id, payload.owner_token)
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束")
+    labels = {"user": "用户", "technology": "技术", "time": "时间", "cost": "成本", "risk": "风险"}
+    missing = [
+        {"key": key, "label": labels[key], "question": "房主确认结束时仍未充分讨论。"}
+        for key in payload.missing_dimensions if key in labels
+    ]
+    with database() as connection:
+        open_vote_ids = [row["id"] for row in connection.execute(
+            "SELECT id FROM votes WHERE session_id = ? AND status = 'open'", (session_id,)
+        ).fetchall()]
+    for vote_id in open_vote_ids:
+        await finalize_vote(session_id, vote_id)
+    report = await generate_room_report(session_id, room["model"], missing)
+    created_at = now_iso()
+    with database() as connection:
+        connection.execute(
+            """INSERT INTO room_reports (session_id, minutes_markdown, retrospective_markdown, missing_dimensions, created_at)
+               VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET
+               minutes_markdown = excluded.minutes_markdown, retrospective_markdown = excluded.retrospective_markdown,
+               missing_dimensions = excluded.missing_dimensions, created_at = excluded.created_at""",
+            (session_id, report["minutes_markdown"], report["retrospective_markdown"], json.dumps(missing, ensure_ascii=False), created_at),
+        )
+        connection.execute("UPDATE rooms SET closed_at = ? WHERE session_id = ?", (created_at, session_id))
+    await manager.broadcast(session_id, {"type": "room_closed", "closed_at": created_at})
+    return {**report, "created_at": created_at, "missing_dimensions": missing}
+
+
+@app.get("/api/rooms/{session_id}/report")
+def get_room_report(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    with database() as connection:
+        row = connection.execute(
+            "SELECT minutes_markdown, retrospective_markdown, missing_dimensions, created_at FROM room_reports WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="讨论纪要尚未生成")
+    return {**dict(row), "missing_dimensions": json.loads(row["missing_dimensions"] or "[]")}
+
+
+@app.get("/api/rooms/{session_id}/report/export.md")
+def export_room_report_markdown(session_id: str, visitor_id: str) -> Response:
+    report = get_room_report(session_id, visitor_id)
+    content = f"{report['minutes_markdown']}\n\n---\n\n{report['retrospective_markdown']}\n"
+    return Response(content, media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": "attachment; filename=roomai-report.md"})
+
+
+@app.get("/api/rooms/{session_id}/report/export.docx")
+def export_room_report_docx(session_id: str, visitor_id: str) -> Response:
+    report = get_room_report(session_id, visitor_id)
+    content = f"{report['minutes_markdown']}\n\n---\n\n{report['retrospective_markdown']}"
+    try:
+        document = markdown_to_docx(content)
+    except ImportError as exc:
+        raise HTTPException(status_code=501, detail="Word 导出依赖未安装，请稍后重试") from exc
+    return Response(
+        document,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": "attachment; filename=roomai-report.docx"},
+    )
 
 
 @app.put("/api/rooms/{session_id}/model")
@@ -1059,6 +1315,8 @@ async def update_model(session_id: str, payload: ModelRequest) -> dict:
     available = list(dict.fromkeys([room["model"], *AVAILABLE_MODELS]))
     if not visitor["is_owner"] or token_hash(payload.owner_token) != room["owner_token_hash"]:
         raise HTTPException(status_code=403, detail="只有房主可以切换模型")
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束")
     if payload.model not in available:
         raise HTTPException(status_code=422, detail="这个模型不在可选列表中")
     with database() as connection:

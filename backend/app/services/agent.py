@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import mimetypes
 import math
 from pathlib import Path
@@ -120,6 +121,7 @@ async def answer_room_prompt(
     phase: str = "diverge",
     summary: str | None = None,
     structured_context: str | None = None,
+    member_names: list[str] | None = None,
 ) -> str | None:
     system = (
         "你是 RoomAI，一个帮助团队讨论立项想法的中文协作助手。紧扣房间主题和已有对话，"
@@ -134,6 +136,13 @@ async def answer_room_prompt(
         system += f"\n滚动总结：{summary}"
     if structured_context:
         system += f"\n结构化记录：{structured_context}"
+    if member_names:
+        system += (
+            "\n如果用户是在提问，请查看结构化想法记录中的 proposer_name，判断是否有成员曾提出相关想法；"
+            "只有内容高度相关且记录中确有该成员时，才在回答末尾单独附上 [[suggest_mention:昵称]]。"
+            f"昵称只能从这些房间成员中选择：{json.dumps(member_names, ensure_ascii=False)}。"
+            "不相关或没有明确提出者时不要附加标记。"
+        )
     messages = [{"role": "system", "content": system}]
     messages.extend(history_message(item) for item in history[-30:] if not item.get("is_recalled"))
     messages.append({"role": "user", "content": prompt})
