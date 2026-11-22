@@ -896,15 +896,15 @@ def get_room(session_id: str, visitor_id: str) -> dict:
 
 
 @app.get("/api/rooms/{session_id}/messages")
-def get_messages(session_id: str, visitor_id: str) -> list[dict]:
+def get_messages(session_id: str, visitor_id: str, after_message_id: int = Query(default=0, ge=0)) -> list[dict]:
     ensure_visitor(session_id, visitor_id)
     with database() as connection:
         rows = connection.execute(
             """SELECT m.*, r.sender_name AS reply_sender_name, r.content AS reply_content,
                       r.is_recalled AS reply_is_recalled
                FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id
-               WHERE m.session_id = ? ORDER BY m.id ASC""",
-            (session_id,),
+               WHERE m.session_id = ? AND m.id > ? ORDER BY m.id ASC""",
+            (session_id, after_message_id),
         ).fetchall()
         return [message_dict(row) for row in rows]
 

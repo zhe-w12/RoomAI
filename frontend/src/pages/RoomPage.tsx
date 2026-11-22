@@ -81,6 +81,7 @@ export default function RoomPage() {
   const [composerValue, setComposerValue] = useState("");
   const [voiceSupported, setVoiceSupported] = useState(false);
   const [voiceListening, setVoiceListening] = useState(false);
+  const [socketStatus, setSocketStatus] = useState<"connecting" | "connected" | "reconnecting" | "disconnected">("connecting");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [linkCopied, setLinkCopied] = useState(false);
@@ -103,6 +104,8 @@ export default function RoomPage() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const voiceBaseDraftRef = useRef("");
+  const lastMessageIdRef = useRef(0);
+  const reconnectNowRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -125,12 +128,20 @@ export default function RoomPage() {
   }, [room?.closed_at]);
 
   const applyMessage = useCallback((message: Message) => {
-    setMessages((current) => current.some((item) => item.id === message.id) ? current.map((item) => item.id === message.id ? message : item) : [...current, message]);
+    lastMessageIdRef.current = Math.max(lastMessageIdRef.current, message.id);
+    setMessages((current) => {
+      const existingIndex = current.findIndex((item) => item.id === message.id);
+      if (existingIndex >= 0) return current.map((item, index) => index === existingIndex ? message : item);
+      const insertIndex = current.findIndex((item) => item.id > message.id);
+      if (insertIndex < 0) return [...current, message];
+      return [...current.slice(0, insertIndex), message, ...current.slice(insertIndex)];
+    });
   }, []);
 
   useEffect(() => {
     let canceled = false;
     async function load() {
+      lastMessageIdRef.current = 0;
       setLoading(true);
       setRoomError("");
       const storedIdentity = loadIdentity(sessionId);
@@ -154,6 +165,7 @@ export default function RoomPage() {
         if (canceled) return;
         setRoom(nextRoom);
         setMessages(nextMessages);
+        lastMessageIdRef.current = nextMessages.reduce((latest, message) => Math.max(latest, message.id), 0);
         setSummary(nextSummary.latest);
         setSummaryVersions(nextSummary.history);
         setIdeas(nextIdeas.ideas);
@@ -191,59 +203,141 @@ export default function RoomPage() {
   }, [loading, sessionId]);
 
   useEffect(() => {
-    if (!identity || !room) return;
-    const socket = new WebSocket(api.socketUrl(sessionId, identity.visitor_id));
-    socketRef.current = socket;
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "message" || data.type === "message_recalled") {
-          applyMessage(data.message as Message);
-          if (!nearBottomRef.current) setNewMessages(true);
-          const incoming = data.message as Message;
-          if (data.type === "message" && incoming.visitor_id !== identity.visitor_id && incoming.content.includes(`@${identity.nickname}`)) {
-            setUnreadMentionIds((current) => [...new Set([...current, incoming.id])]);
+    if (!identity || identity.session_id !== sessionId || loading) return;
+    const visitorId = identity.visitor_id;
+    const nickname = identity.nickname;
+    const maxRetries = 5;
+    let retryCount = 0;
+    let disposed = false;
+    let activeSocket: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let stableTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      if (disposed) return;
+      setSocketStatus(retryCount ? "reconnecting" : "connecting");
+      const socket = new WebSocket(api.socketUrl(sessionId, visitorId));
+      activeSocket = socket;
+      socketRef.current = socket;
+      socket.onopen = () => {
+        if (disposed || activeSocket !== socket) return;
+        const recovered = retryCount > 0;
+        if (stableTimer) clearTimeout(stableTimer);
+        stableTimer = setTimeout(() => {
+          if (activeSocket === socket) retryCount = 0;
+        }, 10_000);
+        setSocketStatus("connected");
+        if (recovered) showToast("连接已恢复");
+        const cursor = lastMessageIdRef.current;
+        void api.getMessages(sessionId, visitorId, cursor).then((missedMessages) => {
+          missedMessages.forEach((message) => {
+            applyMessage(message);
+            if (message.visitor_id !== visitorId && message.content.includes(`@${nickname}`)) {
+              setUnreadMentionIds((current) => [...new Set([...current, message.id])]);
+            }
+          });
+          if (missedMessages.length && !nearBottomRef.current) setNewMessages(true);
+          if (missedMessages.some((message) => message.sender_type === "agent")) {
+            void api.getUsage(sessionId, visitorId).then(setUsage).catch(() => undefined);
           }
-          if (data.type === "message" && incoming.sender_type === "agent") {
-            void api.getUsage(sessionId, identity.visitor_id).then(setUsage).catch(() => undefined);
+        }).catch(() => undefined);
+      };
+      socket.onmessage = (event) => {
+        if (disposed || activeSocket !== socket) return;
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "message" || data.type === "message_recalled") {
+            applyMessage(data.message as Message);
+            if (!nearBottomRef.current) setNewMessages(true);
+            const incoming = data.message as Message;
+            if (data.type === "message" && incoming.visitor_id !== visitorId && incoming.content.includes(`@${nickname}`)) {
+              setUnreadMentionIds((current) => [...new Set([...current, incoming.id])]);
+            }
+            if (data.type === "message" && incoming.sender_type === "agent") {
+              void api.getUsage(sessionId, visitorId).then(setUsage).catch(() => undefined);
+            }
           }
+          if (data.type === "presence") setOnlineIds((data.members as Member[]).map((member) => member.visitor_id));
+          if (data.type === "typing" && data.visitor_id !== visitorId) {
+            setTypingNames((current) => data.active ? [...new Set([...current, data.nickname])] : current.filter((name) => name !== data.nickname));
+            if (data.active && data.visitor_id !== "roomai") window.setTimeout(() => setTypingNames((current) => current.filter((name) => name !== data.nickname)), 3200);
+          }
+          if (data.type === "phase_changed") setRoom((current) => current ? { ...current, phase: data.phase } : current);
+          if (data.type === "model_changed") setRoom((current) => current ? { ...current, model: data.model } : current);
+          if (data.type === "red_team_setting") setRoom((current) => current ? { ...current, red_team_enabled: Boolean(data.enabled) } : current);
+          if (data.type === "summary_update") {
+            const nextSummary = {
+              version: data.summary.version,
+              content: data.summary,
+              through_message_id: data.summary.through_message_id,
+              created_at: data.summary.created_at,
+            } as SummaryVersion;
+            setSummary(nextSummary);
+            setSummaryVersions((current) => [nextSummary, ...current.filter((item) => item.version !== nextSummary.version)].slice(0, 20));
+            void api.getUsage(sessionId, visitorId).then(setUsage).catch(() => undefined);
+          }
+          if (data.type === "idea_update") setIdeas(data.ideas as Idea[]);
+          if (data.type === "vote_created") setVotes((current) => [...current.filter((vote) => vote.id !== data.vote.id), data.vote as Vote]);
+          if (data.type === "vote_update") setVotes((current) => current.map((vote) => vote.id === data.vote.id ? { ...vote, ...(data.vote as Vote), my_option_id: vote.my_option_id } : vote));
+          if (data.type === "todo_update") setTodos(data.todos as Todo[]);
+          if (data.type === "documents_update") setDocuments(data.documents as RoomDocument[]);
+          if (data.type === "room_closed") setRoom((current) => current ? { ...current, closed_at: data.closed_at as string } : current);
+          if (data.type === "room_deleted") {
+            localStorage.removeItem(`roomai:identity:${sessionId}`);
+            navigate("/", { replace: true });
+          }
+        } catch {
+          // Ignore malformed events and keep the chat connection alive.
         }
-        if (data.type === "presence") setOnlineIds((data.members as Member[]).map((member) => member.visitor_id));
-        if (data.type === "typing" && data.visitor_id !== identity.visitor_id) {
-          setTypingNames((current) => data.active ? [...new Set([...current, data.nickname])] : current.filter((name) => name !== data.nickname));
-          if (data.active && data.visitor_id !== "roomai") window.setTimeout(() => setTypingNames((current) => current.filter((name) => name !== data.nickname)), 3200);
+      };
+      socket.onerror = () => socket.close();
+      socket.onclose = (event) => {
+        if (activeSocket !== socket) return;
+        activeSocket = null;
+        if (socketRef.current === socket) socketRef.current = null;
+        if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
+        if (disposed) return;
+        if (event.code === 4403) {
+          setSocketStatus("disconnected");
+          setError("房间连接凭证失效，请刷新后重新加入房间。");
+          return;
         }
-        if (data.type === "phase_changed") setRoom((current) => current ? { ...current, phase: data.phase } : current);
-        if (data.type === "model_changed") setRoom((current) => current ? { ...current, model: data.model } : current);
-        if (data.type === "red_team_setting") setRoom((current) => current ? { ...current, red_team_enabled: Boolean(data.enabled) } : current);
-        if (data.type === "summary_update") {
-          const nextSummary = {
-            version: data.summary.version,
-            content: data.summary,
-            through_message_id: data.summary.through_message_id,
-            created_at: data.summary.created_at,
-          } as SummaryVersion;
-          setSummary(nextSummary);
-          setSummaryVersions((current) => [nextSummary, ...current.filter((item) => item.version !== nextSummary.version)].slice(0, 20));
-          void api.getUsage(sessionId, identity.visitor_id).then(setUsage).catch(() => undefined);
+        if (retryCount >= maxRetries) {
+          setSocketStatus("disconnected");
+          return;
         }
-        if (data.type === "idea_update") setIdeas(data.ideas as Idea[]);
-        if (data.type === "vote_created") setVotes((current) => [...current.filter((vote) => vote.id !== data.vote.id), data.vote as Vote]);
-        if (data.type === "vote_update") setVotes((current) => current.map((vote) => vote.id === data.vote.id ? { ...vote, ...(data.vote as Vote), my_option_id: vote.my_option_id } : vote));
-        if (data.type === "todo_update") setTodos(data.todos as Todo[]);
-        if (data.type === "documents_update") setDocuments(data.documents as RoomDocument[]);
-        if (data.type === "room_closed") setRoom((current) => current ? { ...current, closed_at: data.closed_at as string } : current);
-        if (data.type === "room_deleted") {
-          localStorage.removeItem(`roomai:identity:${sessionId}`);
-          navigate("/", { replace: true });
-        }
-      } catch {
-        // Ignore malformed events and keep the chat connection alive.
-      }
+        const delay = Math.min(500 * (2 ** retryCount), 8000);
+        retryCount += 1;
+        setSocketStatus("reconnecting");
+        retryTimer = setTimeout(connect, delay);
+      };
     };
-    socket.onclose = () => { if (socketRef.current === socket) socketRef.current = null; };
-    return () => { socket.close(); socketRef.current = null; };
-  }, [applyMessage, identity, room, sessionId]);
+
+    const reconnectNow = () => {
+      retryCount = 0;
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      const previousSocket = activeSocket;
+      activeSocket = null;
+      if (socketRef.current === previousSocket) socketRef.current = null;
+      if (previousSocket) {
+        previousSocket.onclose = null;
+        previousSocket.close();
+      }
+      connect();
+    };
+    reconnectNowRef.current = reconnectNow;
+    connect();
+    return () => {
+      disposed = true;
+      reconnectNowRef.current = null;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (stableTimer) clearTimeout(stableTimer);
+      const socket = activeSocket;
+      activeSocket = null;
+      if (socketRef.current === socket) socketRef.current = null;
+      socket?.close();
+    };
+  }, [applyMessage, identity?.nickname, identity?.session_id, identity?.visitor_id, loading, navigate, sessionId]);
 
   useEffect(() => {
     if (nearBottom) {
@@ -283,6 +377,7 @@ export default function RoomPage() {
       ]);
       setRoom(nextRoom);
       setMessages(nextMessages);
+      lastMessageIdRef.current = nextMessages.reduce((latest, message) => Math.max(latest, message.id), 0);
       setSummary(nextSummary.latest);
       setSummaryVersions(nextSummary.history);
       setIdeas(nextIdeas.ideas);
@@ -787,6 +882,7 @@ export default function RoomPage() {
         <button className="icon-btn mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="打开侧栏"><Menu size={19} /></button>
         <div className="topbar-title"><h1 title={room.topic}>{room.topic}</h1></div>
         <button className={`phase-btn ${room.phase === "converge" ? "phase-converge" : ""}`} onClick={togglePhase} disabled={!identity.owner_token || Boolean(room.closed_at)} title={identity.owner_token ? "点击切换讨论阶段" : "发散阶段"}><i />{room.phase === "diverge" ? "发散" : "收敛"}</button>
+        {socketStatus !== "connected" && <>{socketStatus === "disconnected" ? <button className="connection-status connection-offline" onClick={() => reconnectNowRef.current?.()}>重试连接</button> : <span className="connection-status" aria-live="polite">{socketStatus === "connecting" ? "连接中…" : "重连中…"}</span>}</>}
         <div className="online" title={`${onlineMembers.length} 人在线`}><span className="online-stack">{onlineMembers.slice(0, 3).map((member) => <i key={member.visitor_id}>{member.nickname.slice(0, 1)}</i>)}</span><span>{onlineMembers.length} 在线</span></div>
         <span className="top-sep" />
         {unreadMentionIds.length > 0 && <button className="mention-badge" onClick={() => void openUnreadMention()} title="跳转到未读 @ 提醒"><AtSign size={13} /><span>{unreadMentionIds.length}</span></button>}
