@@ -107,6 +107,16 @@ CREATE TABLE IF NOT EXISTS idea_votes (
     created_at TEXT NOT NULL,
     UNIQUE(idea_id, visitor_id)
 );
+CREATE TABLE IF NOT EXISTS idea_supplements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+    visitor_id TEXT REFERENCES visitors(visitor_id) ON DELETE SET NULL,
+    contributor_name TEXT NOT NULL DEFAULT '',
+    message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(idea_id, visitor_id),
+    UNIQUE(idea_id, message_id)
+);
 CREATE TABLE IF NOT EXISTS todos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
@@ -224,6 +234,12 @@ def database():
 def initialize_database() -> None:
     with database() as connection:
         connection.executescript(SCHEMA)
+        connection.execute(
+            """INSERT OR IGNORE INTO idea_supplements (idea_id, visitor_id, contributor_name, created_at)
+               SELECT iv.idea_id, iv.visitor_id, COALESCE(v.nickname, '成员'), iv.created_at
+               FROM idea_votes iv LEFT JOIN visitors v ON v.visitor_id = iv.visitor_id
+               WHERE iv.stance = 'supplement'"""
+        )
         todo_columns = {row[1] for row in connection.execute("PRAGMA table_info(todos)")}
         if "due_at" not in todo_columns:
             connection.execute("ALTER TABLE todos ADD COLUMN due_at TEXT")

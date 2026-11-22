@@ -356,10 +356,18 @@ async def analyze_room(
                 proposer = "匿名成员"
             elif proposer not in known_member_names:
                 proposer = ""
-            if found and source_message and source_message.get("visitor_id"):
+            if found and source_message:
                 connection.execute(
-                    "INSERT OR IGNORE INTO idea_votes (idea_id, visitor_id, stance, created_at) VALUES (?, ?, 'supplement', ?)",
-                    (found["id"], source_message["visitor_id"], created_at),
+                    """INSERT OR IGNORE INTO idea_supplements
+                       (idea_id, visitor_id, contributor_name, message_id, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        found["id"],
+                        source_message.get("visitor_id"),
+                        str(source_message["sender_name"])[:80],
+                        source_id,
+                        created_at,
+                    ),
                 )
             if found:
                 idea_id = found["id"]

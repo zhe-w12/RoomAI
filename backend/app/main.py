@@ -479,9 +479,20 @@ def get_ideas_for_event(session_id: str, visitor_id: str | None = None) -> list[
                FROM ideas i WHERE i.session_id = ?""",
             (visitor_id, session_id),
         ).fetchall()
+        supplement_rows = connection.execute(
+            """SELECT idea_id, contributor_name FROM idea_supplements
+               WHERE idea_id IN (SELECT id FROM ideas WHERE session_id = ?) ORDER BY id""",
+            (session_id,),
+        ).fetchall()
+    supplementers_by_idea: dict[int, list[str]] = defaultdict(list)
+    for row in supplement_rows:
+        contributor = str(row["contributor_name"] or "").strip()
+        if contributor and contributor not in supplementers_by_idea[int(row["idea_id"])]:
+            supplementers_by_idea[int(row["idea_id"])].append(contributor)
     ideas = []
     for row in rows:
         item = dict(row)
+        item["supplementers"] = supplementers_by_idea.get(int(item["id"]), [])
         item["dimensions"] = json.loads(item["dimensions"] or "{}")
         scores = list(item["dimensions"].values())
         item["average_score"] = round(sum(scores) / len(scores), 1) if scores else None

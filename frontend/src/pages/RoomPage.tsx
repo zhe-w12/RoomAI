@@ -1042,7 +1042,7 @@ export default function RoomPage() {
       {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <div className="idea-item" key={idea.id}>
         <button type="button" className="idea-item-main" onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
           <span className="idea-item-title">{idea.title}</span>
-          <span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}</span>
+          <span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}{idea.supplementers.length ? ` · 补充：${idea.supplementers.join("、")}` : ""}</span>
           <span className="idea-status-label">{ideaStatusLabels[idea.status]}</span>
         </button>
         <div className="idea-item-controls">

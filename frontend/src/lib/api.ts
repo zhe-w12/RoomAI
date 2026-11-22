@@ -67,6 +67,7 @@ export type Idea = {
   strengths: string;
   tradeoffs: string;
   proposer_name: string;
+  supplementers: string[];
   source_message_id: number | null;
   status: IdeaStatus;
   dimensions: Record<string, number>;

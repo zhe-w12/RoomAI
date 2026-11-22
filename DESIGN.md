@@ -100,7 +100,7 @@
 | S6 | AI 闲置跟进 | 对话停 1 分钟且 ≥3 条新消息 → AI 出一轮总结 + 新想法评估 | 计时任务收到新消息就重置；输出后重置；无人说话不再重复刷屏 |
 | S7 | @AI 召唤 | @AI + 具体要求 → Supervisor 按意图路由：总结 / 评估指定想法 / 推荐新想法 / 回答问题 / 画图 / 挑战 | 没指定意图默认总结 + 评估；推荐新想法只基于已有讨论，不凭空编 |
 | S8 | AI 主动参与 | 看到值得追问的点追问，看到好想法肯定补充 | 冷却 3 分钟内最多 1 次；不跟随每条消息回复；不打断连续发言 |
-| S9 | 想法入库与去重 | 新想法先与 ideas 表比对，语义重复则合并到原想法，补充者记入 idea_votes（stance=补充） | 想法池不膨胀；评估按合并后的想法打分 |
+| S9 | 想法入库与去重 | 新想法先与 ideas 表比对，语义重复则合并到原想法，补充者独立记入 idea_supplements | 想法池不膨胀；评估按合并后的想法打分 |
 | S10 | 想法评估与排序 | 评估员六维打分 + 一句话理由 → 想法池实时更新 | 六维平均分排序，同分按支持多、反对少；分数是参考，理由给人看 |
 | S11 | 分歧与投票 | AI 检测到两人意见相反 → 点出分歧 → 发起投票卡（挂在 AI 消息下）→ 成员点选、可改票 → 房主结束或超时结束 → 结果归档到 decisions 表 | 一人一票，改票更新同一条记录；票数 WebSocket 实时广播 |
 | S12 | 阶段切换 | 房主手动切换发散 / 收敛；或 AI 在讨论到一定量时建议切换，房主确认 | 发散期宽松评分、红队不出现；收敛期严格评分、推动决策、红队可出现 |
@@ -261,7 +261,7 @@ frontend/src/
          ├─ 评估员：新想法 → 六维打分 + 理由 → 写 evaluations 表
          ├─ 总结员：增量更新滚动摘要 → 写 summaries 表（新版本）
          └─ 引导员：值得追问的点 / 跑题 / 冷场 → 追问或肯定补充 → 以 Agent 消息发出（主动发言有冷却）
-    存储：SQLite（rooms / visitors / messages / mentions / ideas / idea_votes /
+    存储：SQLite（rooms / visitors / messages / mentions / ideas / idea_votes / idea_supplements /
           evaluations / summaries / decisions / todos / votes / vote_options /
           vote_records / attachments / usage）+ LangGraph checkpoint
           （thread_id = session_id）+ 图片文件（服务器本地 uploads/，按 session_id 分目录）
@@ -323,7 +323,8 @@ Mermaid 图表（方案可视化）。
 | mentions | id、message_id、session_id、mentioned_visitor_id、is_read、created_at | @提醒记录；点开或查看后标已读 |
 | ideas | id、session_id、proposer、content、status（讨论中/采纳/否决/待定）、first_message_id | 想法是结构化记忆的核心，状态流转要留痕 |
 | idea_status_history | id、idea_id、from_status、to_status、changed_by_visitor_id、created_at | 记录每次状态变化，并在讨论回放中展示 |
-| idea_votes | idea_id、visitor_id、stance（支持/反对/补充）、created_at | 谁支持、谁反对，纪要里能追溯 |
+| idea_votes | idea_id、visitor_id、stance（支持/反对）、created_at | 谁支持、谁反对，可改票并在纪要里汇总 |
+| idea_supplements | idea_id、visitor_id、contributor_name、message_id、created_at | 去重合并时独立保留补充者，不与可修改的支持/反对票冲突 |
 | evaluations | id、session_id、idea_id、feasibility、cost、timeline、risk、innovation、team_fit（各 1–5 分）、reason、created_at | 六维打分 + 理由；分数是参考，理由才是给人看的 |
 | summaries | id、session_id、version、content（共识/分歧/待办）、based_on_message_ids、created_at | 每次触发产生一个新版本，不覆盖旧版 |
 | decisions | id、session_id、content、decided_at | 讨论中达成的决策 |
@@ -443,7 +444,7 @@ AI 可建议切换）。发散阶段评估员只记录想法、打分宽松，�
 **图片进记忆的方式：**近期图片以原图进多模态 prompt；滚动摘要时为每张图片生成一句文字
 描述存入记忆，替代原图——讨论越长，早期图片越不需要原图，省 token 又不丢信息。
 
-**想法去重合并：**新想法入库前，Agent 先与 ideas 表里的已有想法比对；语义重复的合并到原想法（不新增行），把补充者记到 idea_votes（stance=补充），评估时按合并后的想法打分。这样想法池不膨胀，纪要里的想法清单也没有重复。
+**想法去重合并：**新想法入库前，Agent 先与 ideas 表里的已有想法比对；语义重复的合并到原想法（不新增行），补充者写入独立的 idea_supplements 表并显示在想法池里，不会被后续改票覆盖；评估时按合并后的想法打分。这样想法池不膨胀，纪要里的想法清单也没有重复。
 
 **记忆持续更新（每次触发都刷新，不是只在结束时写一次）：**
 每次触发后，Agent 的结构化输出直接回写记忆——生成新版本滚动摘要；
