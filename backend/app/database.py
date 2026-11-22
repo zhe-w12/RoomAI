@@ -107,6 +107,12 @@ CREATE TABLE IF NOT EXISTS todos (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS todo_card_items (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    todo_id INTEGER NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, todo_id)
+);
+CREATE INDEX IF NOT EXISTS todo_card_items_todo ON todo_card_items(todo_id);
 CREATE TABLE IF NOT EXISTS usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,

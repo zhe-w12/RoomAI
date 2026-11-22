@@ -286,7 +286,8 @@ def touch_room_activity(session_id: str, at: str | None = None) -> None:
 def get_message(connection, session_id: str, message_id: int) -> dict:
     row = connection.execute(
         """SELECT m.*, r.sender_name AS reply_sender_name, r.content AS reply_content,
-                  r.is_recalled AS reply_is_recalled
+                  r.is_recalled AS reply_is_recalled,
+                  (SELECT group_concat(todo_id, ',') FROM todo_card_items WHERE message_id = m.id) AS todo_ids_raw
            FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id
            WHERE m.session_id = ? AND m.id = ?""",
         (session_id, message_id),
@@ -297,6 +298,7 @@ def get_message(connection, session_id: str, message_id: int) -> dict:
 def message_dict(row) -> dict:
     item = dict(row)
     image_path = item.pop("image_path", None)
+    item["todo_ids"] = [int(value) for value in (item.pop("todo_ids_raw", "") or "").split(",") if value.isdigit()]
     if item["is_recalled"]:
         item["content"] = ""
         item["image_url"] = None
@@ -349,6 +351,7 @@ async def publish_room_analysis(session_id: str, *, auto_vote: bool = True) -> d
             await manager.broadcast(session_id, {"type": "message", "message": message})
             return None
         message = create_message_record(session_id, None, "RoomAI", "agent", result["message"], now_iso())
+        message["todo_ids"] = attach_todos_to_message(session_id, message["id"], result.get("todo_ids", []))
         await manager.broadcast(session_id, {"type": "message", "message": message})
         await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
         ideas = get_ideas_for_event(session_id)
@@ -495,6 +498,25 @@ def get_room_todos(session_id: str) -> list[dict]:
             (session_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def attach_todos_to_message(session_id: str, message_id: int, todo_ids: list[int]) -> list[int]:
+    ids = list(dict.fromkeys(item for item in todo_ids if isinstance(item, int) and item > 0))
+    if not ids:
+        return []
+    with database() as connection:
+        valid_ids = [
+            int(row["id"])
+            for row in connection.execute(
+                f"SELECT id FROM todos WHERE session_id = ? AND id IN ({','.join('?' for _ in ids)})",
+                (session_id, *ids),
+            ).fetchall()
+        ]
+        connection.executemany(
+            "INSERT OR IGNORE INTO todo_card_items (message_id, todo_id) VALUES (?, ?)",
+            [(message_id, todo_id) for todo_id in valid_ids],
+        )
+    return valid_ids
 
 
 def vote_state(session_id: str, vote_id: int, visitor_id: str | None = None) -> dict | None:
@@ -976,7 +998,8 @@ def get_messages(session_id: str, visitor_id: str, after_message_id: int = Query
     with database() as connection:
         rows = connection.execute(
             """SELECT m.*, r.sender_name AS reply_sender_name, r.content AS reply_content,
-                      r.is_recalled AS reply_is_recalled
+                      r.is_recalled AS reply_is_recalled,
+                      (SELECT group_concat(todo_id, ',') FROM todo_card_items WHERE message_id = m.id) AS todo_ids_raw
                FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id
                WHERE m.session_id = ? AND m.id > ? ORDER BY m.id ASC""",
             (session_id, after_message_id),
@@ -1903,6 +1926,9 @@ async def review_finish(session_id: str, payload: FinishReviewRequest) -> dict:
             force_analysis=True,
         )
     if isinstance(result, dict) and result:
+        message = create_message_record(session_id, None, "RoomAI", "agent", result["message"], now_iso())
+        message["todo_ids"] = attach_todos_to_message(session_id, message["id"], result.get("todo_ids", []))
+        await manager.broadcast(session_id, {"type": "message", "message": message})
         await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
         await manager.broadcast(session_id, {"type": "idea_update", "ideas": get_ideas_for_event(session_id)})
         await manager.broadcast(session_id, {"type": "todo_update", "todos": get_room_todos(session_id)})

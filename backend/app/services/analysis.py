@@ -323,6 +323,7 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
             item["dimensions"] = json.loads(item["dimensions"] or "{}")
             item["average_score"] = round(sum(item["dimensions"].values()) / len(item["dimensions"]), 1) if item["dimensions"] else None
             saved_ideas.append(item)
+        touched_todo_ids = []
         for todo in summary_data["todos"]:
             title = str(todo.get("title", "")).strip()[:300]
             if not title:
@@ -348,17 +349,21 @@ async def analyze_room(session_id: str, model: str, *, force: bool = False) -> d
                     "UPDATE todos SET title = ?, assignee = ?, status = ?, due_at = COALESCE(?, due_at), source_message_id = COALESCE(?, source_message_id), updated_at = ? WHERE id = ?",
                     (title, assignee, status, due_at, source_id, created_at, existing["id"]),
                 )
+                saved_todo_id = int(existing["id"])
             else:
                 connection.execute(
                     "INSERT INTO todos (session_id, title, assignee, status, due_at, source_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (session_id, title, assignee, status, due_at, source_id, created_at, created_at),
                 )
+                saved_todo_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+            touched_todo_ids.append(saved_todo_id)
     summary_data["version"] = version
     summary_data["through_message_id"] = latest_message
     summary_data["created_at"] = created_at
     return {
         "summary": summary_data,
         "ideas": saved_ideas,
+        "todo_ids": list(dict.fromkeys(touched_todo_ids)),
         "message": _format_summary(summary_data, version, saved_ideas),
         "model": result["model"],
     }

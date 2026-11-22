@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Send, Settings2, Sparkles, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
 import { api, FinishReview, Identity, Idea, IdeaStatus, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
+import TodoCard from "../components/TodoCard";
 import VoteCard, { Vote } from "../components/VoteCard";
 
 const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/用户视角", "/待办", "/结束", "/帮助"];
@@ -99,6 +100,7 @@ export default function RoomPage() {
   const [summaryHistoryOpen, setSummaryHistoryOpen] = useState(false);
   const [editingTodo, setEditingTodo] = useState<Todo | null>(null);
   const [todoSaving, setTodoSaving] = useState(false);
+  const [todoBusyIds, setTodoBusyIds] = useState<number[]>([]);
   const [voteBusyIds, setVoteBusyIds] = useState<number[]>([]);
   const [modelSaving, setModelSaving] = useState(false);
   const [prepOpen, setPrepOpen] = useState(true);
@@ -824,6 +826,25 @@ export default function RoomPage() {
     }
   }
 
+  async function toggleTodo(todo: Todo) {
+    if (!identity || room?.closed_at || todoBusyIds.includes(todo.id)) return;
+    setTodoBusyIds((current) => [...current, todo.id]);
+    try {
+      const result = await api.updateTodo(sessionId, identity.visitor_id, {
+        id: todo.id,
+        title: todo.title,
+        assignee: todo.assignee,
+        status: todo.status === "done" ? "open" : "done",
+        due_at: todo.due_at,
+      });
+      setTodos((current) => current.map((item) => item.id === result.todo.id ? result.todo : item));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "更新待办状态失败");
+    } finally {
+      setTodoBusyIds((current) => current.filter((id) => id !== todo.id));
+    }
+  }
+
   async function copyInvite() {
     try {
       await navigator.clipboard.writeText(`${window.location.origin}/room/${sessionId}`);
@@ -1101,6 +1122,7 @@ export default function RoomPage() {
             const previous = filteredMessages[index - 1];
             const showAuthor = !previous || previous.sender_name !== message.sender_name || new Date(message.created_at).getTime() - new Date(previous.created_at).getTime() > 5 * 60 * 1000;
             const showDateDivider = !previous || localDayKey(previous.created_at) !== localDayKey(message.created_at);
+            const messageTodos = (message.todo_ids || []).map((todoId) => todos.find((todo) => todo.id === todoId)).filter((todo): todo is Todo => Boolean(todo));
             const mentioned = !own && message.content.includes(`@${identity.nickname}`);
             const mentionSuggestion = isAgentMessage ? message.content.match(/\[\[suggest_mention:([^\]]+)\]\]\s*$/) : null;
             const visibleContent = mentionSuggestion ? message.content.replace(/\n?\[\[suggest_mention:[^\]]+\]\]\s*$/, "").trim() : message.content;
@@ -1120,6 +1142,7 @@ export default function RoomPage() {
                     {message.image_url && <button className="msg-img" onClick={() => window.open(api.imageUrl(message.image_url!), "_blank", "noopener,noreferrer")}><img src={api.imageUrl(message.image_url)} alt="讨论附件" /></button>}
                   </>}
                 </div>
+                {messageTodos.length > 0 && <TodoCard todos={messageTodos} disabled={Boolean(room.closed_at)} busyIds={todoBusyIds} onToggle={(todo) => void toggleTodo(todo)} onEdit={setEditingTodo} />}
                 {votesByMessage.has(message.id) && <VoteCard vote={votesByMessage.get(message.id)!} isOwner={Boolean(identity.owner_token)} busy={voteBusyIds.includes(votesByMessage.get(message.id)!.id)} onVote={(voteId, optionId) => void castVote(voteId, optionId)} onClose={(voteId) => void closeVote(voteId)} />}
               </div>
             </article>

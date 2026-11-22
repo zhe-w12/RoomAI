@@ -135,6 +135,7 @@ export type Message = {
   content: string;
   reply_to: { id: number; sender_name: string; content: string } | null;
   image_url: string | null;
+  todo_ids?: number[];
   is_recalled: number;
   created_at: string;
 };
