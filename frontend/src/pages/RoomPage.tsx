@@ -1,7 +1,7 @@
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, FileText, History, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Undo2, X } from "lucide-react";
-import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
+import { ArrowDown, ArrowRight, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Command, Copy, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Reply, Search, Send, Settings2, Sparkles, Trash2, Undo2, X } from "lucide-react";
+import { api, FinishReview, Identity, Idea, loadIdentity, Member, Message, Room, RoomDocument, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import MarkdownContent from "../components/MarkdownContent";
 import VoteCard, { Vote } from "../components/VoteCard";
 
@@ -11,6 +11,10 @@ const emptyUsage: RoomUsage = { prompt_tokens: 0, completion_tokens: 0, total_to
 
 function formatTime(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function formatFileSize(value: number) {
+  return value >= 1024 * 1024 ? `${(value / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.ceil(value / 1024))} KB`;
 }
 
 export default function RoomPage() {
@@ -23,6 +27,8 @@ export default function RoomPage() {
   const [summaryVersions, setSummaryVersions] = useState<SummaryVersion[]>([]);
   const [ideas, setIdeas] = useState<Idea[]>([]);
   const [todos, setTodos] = useState<Todo[]>([]);
+  const [documents, setDocuments] = useState<RoomDocument[]>([]);
+  const [documentUploading, setDocumentUploading] = useState(false);
   const [usage, setUsage] = useState<RoomUsage | null>(null);
   const [votes, setVotes] = useState<Vote[]>([]);
   const [unreadMentionIds, setUnreadMentionIds] = useState<number[]>([]);
@@ -91,7 +97,7 @@ export default function RoomPage() {
       }
       setIdentity(storedIdentity);
       try {
-        const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos] = await Promise.all([
+        const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos, nextDocuments] = await Promise.all([
           api.getRoom(sessionId, storedIdentity.visitor_id),
           api.getMessages(sessionId, storedIdentity.visitor_id),
           api.getMentions(sessionId, storedIdentity.visitor_id),
@@ -100,6 +106,7 @@ export default function RoomPage() {
           api.getUsage(sessionId, storedIdentity.visitor_id).catch(() => emptyUsage),
           api.getVotes(sessionId, storedIdentity.visitor_id),
           api.getTodos(sessionId, storedIdentity.visitor_id),
+          api.getDocuments(sessionId, storedIdentity.visitor_id),
         ]);
         if (canceled) return;
         setRoom(nextRoom);
@@ -110,6 +117,7 @@ export default function RoomPage() {
         setUsage(nextUsage);
         setVotes(nextVotes.votes);
         setTodos(nextTodos.todos);
+        setDocuments(nextDocuments.documents);
         setUnreadMentionIds(mentions.message_ids);
       } catch (err) {
         if (canceled) return;
@@ -180,6 +188,7 @@ export default function RoomPage() {
         if (data.type === "vote_created") setVotes((current) => [...current.filter((vote) => vote.id !== data.vote.id), data.vote as Vote]);
         if (data.type === "vote_update") setVotes((current) => current.map((vote) => vote.id === data.vote.id ? { ...vote, ...(data.vote as Vote), my_option_id: vote.my_option_id } : vote));
         if (data.type === "todo_update") setTodos(data.todos as Todo[]);
+        if (data.type === "documents_update") setDocuments(data.documents as RoomDocument[]);
         if (data.type === "room_closed") setRoom((current) => current ? { ...current, closed_at: data.closed_at as string } : current);
         if (data.type === "room_deleted") {
           localStorage.removeItem(`roomai:identity:${sessionId}`);
@@ -222,11 +231,12 @@ export default function RoomPage() {
       const joined = await api.joinByLink(sessionId, joinName.trim(), joinPassword);
       saveIdentity(joined);
       setIdentity(joined);
-      const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos] = await Promise.all([
+      const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos, nextDocuments] = await Promise.all([
         api.getRoom(sessionId, joined.visitor_id), api.getMessages(sessionId, joined.visitor_id), api.getMentions(sessionId, joined.visitor_id),
         api.getSummary(sessionId, joined.visitor_id), api.getIdeas(sessionId, joined.visitor_id), api.getUsage(sessionId, joined.visitor_id).catch(() => emptyUsage),
         api.getVotes(sessionId, joined.visitor_id),
         api.getTodos(sessionId, joined.visitor_id),
+        api.getDocuments(sessionId, joined.visitor_id),
       ]);
       setRoom(nextRoom);
       setMessages(nextMessages);
@@ -236,6 +246,7 @@ export default function RoomPage() {
       setUsage(nextUsage);
       setVotes(nextVotes.votes);
       setTodos(nextTodos.todos);
+      setDocuments(nextDocuments.documents);
       setUnreadMentionIds(mentions.message_ids);
     } catch (err) {
       setRoomError(err instanceof Error ? err.message : "无法加入房间");
@@ -285,6 +296,36 @@ export default function RoomPage() {
       setError(err instanceof Error ? err.message : "发送失败，请重试");
     } finally {
       setSending(false);
+    }
+  }
+
+  async function uploadRoomDocument(file?: File) {
+    if (!identity || !file || documentUploading) return;
+    if (file.size > 10 * 1024 * 1024) {
+      setError("资料文件不能超过 10MB");
+      return;
+    }
+    setDocumentUploading(true);
+    setError("");
+    try {
+      const result = await api.uploadDocument(sessionId, identity.visitor_id, file);
+      setDocuments((current) => [result.document, ...current.filter((item) => item.id !== result.document.id)]);
+      setToast(`已添加「${result.document.filename}」，提问时会检索相关段落`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "添加资料失败，请重试");
+    } finally {
+      setDocumentUploading(false);
+    }
+  }
+
+  async function removeRoomDocument(document: RoomDocument) {
+    if (!identity || !window.confirm(`删除资料「${document.filename}」？RoomAI 将不再从中检索内容。`)) return;
+    try {
+      await api.deleteDocument(sessionId, identity, document.id);
+      setDocuments((current) => current.filter((item) => item.id !== document.id));
+      setToast("已删除讨论资料");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "删除资料失败，请重试");
     }
   }
 
@@ -609,6 +650,16 @@ export default function RoomPage() {
       {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <button className="idea-item" key={idea.id} onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
         <span className="idea-item-title">{idea.title}</span><span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}</span>
       </button>)}</div> : <p className="side-empty">值得做的想法，会在讨论中浮现。</p>}
+
+      <div className="side-label-row document-heading">
+        <p className="side-label">讨论资料</p>
+        <span className="document-heading-actions"><span className="count">{documents.length}/20</span><label className={`icon-btn attach document-add ${room.closed_at || documents.length >= 20 || documentUploading ? "disabled" : ""}`} title={room.closed_at ? "讨论已结束" : documents.length >= 20 ? "每个房间最多 20 份资料" : "添加讨论资料"}><FilePlus2 size={14} /><input type="file" disabled={Boolean(room.closed_at) || documents.length >= 20 || documentUploading} accept=".pdf,.docx,.pptx,.txt,.md,application/pdf,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadRoomDocument(file); event.currentTarget.value = ""; }} /></label></span>
+      </div>
+      {documents.length ? <div className="document-list">{documents.map((item) => <div className="document-item" key={item.id}>
+        <FileText size={14} className="document-icon" />
+        <span className="document-copy" title={item.filename}><b>{item.filename}</b><small>{formatFileSize(item.size)} · {item.chunk_count} 段 · {item.uploaded_by}</small></span>
+        {(identity.owner_token || item.uploaded_by === identity.nickname) && !room.closed_at && <button className="icon-btn document-delete" onClick={() => void removeRoomDocument(item)} aria-label={`删除资料 ${item.filename}`} title="删除资料"><Trash2 size={13} /></button>}
+      </div>)}</div> : <p className="side-empty">添加 PDF、Word、PPT、TXT 或 Markdown，RoomAI 会按问题检索相关内容。</p>}
 
       <p className="side-label">讨论维度</p>
       <div className="dim-list">{dimensionLabels.map(([label, key]) => {

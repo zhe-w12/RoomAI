@@ -158,6 +158,27 @@ CREATE TABLE IF NOT EXISTS room_reports (
     missing_dimensions TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS room_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES rooms(session_id) ON DELETE CASCADE,
+    visitor_id TEXT NOT NULL REFERENCES visitors(visitor_id) ON DELETE CASCADE,
+    filename TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS room_documents_session_created ON room_documents(session_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    document_id INTEGER NOT NULL REFERENCES room_documents(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    vector_json TEXT NOT NULL,
+    UNIQUE(document_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS document_chunks_document_index ON document_chunks(document_id, chunk_index);
 """
 
 

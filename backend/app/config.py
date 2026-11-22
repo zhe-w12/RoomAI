@@ -18,6 +18,7 @@ def _path_from_env(name: str, default: str) -> Path:
 
 DATABASE_PATH = _path_from_env("DATABASE_PATH", "backend/data/roomai.sqlite3")
 UPLOAD_DIR = _path_from_env("UPLOAD_DIR", "backend/uploads")
+DOCUMENT_DIR = _path_from_env("DOCUMENT_DIR", "backend/documents")
 MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "https://aiping.cn/api/v1").rstrip("/")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "GLM-5.3-Flash")

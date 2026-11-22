@@ -77,6 +77,16 @@ export type RoomUsage = {
   cost_configured: boolean;
 };
 
+export type RoomDocument = {
+  id: number;
+  filename: string;
+  media_type: string;
+  size: number;
+  chunk_count: number;
+  created_at: string;
+  uploaded_by: string;
+};
+
 export type Todo = {
   id: number;
   session_id: string;
@@ -152,6 +162,19 @@ export const api = {
     request<{ ideas: Idea[] }>(`/api/rooms/${sessionId}/ideas?visitor_id=${encodeURIComponent(visitorId)}`),
   getTodos: (sessionId: string, visitorId: string) =>
     request<{ todos: Todo[] }>(`/api/rooms/${sessionId}/todos?visitor_id=${encodeURIComponent(visitorId)}`),
+  getDocuments: (sessionId: string, visitorId: string) =>
+    request<{ documents: RoomDocument[] }>(`/api/rooms/${sessionId}/documents?visitor_id=${encodeURIComponent(visitorId)}`),
+  uploadDocument: async (sessionId: string, visitorId: string, file: File) => {
+    const form = new FormData();
+    form.append("visitor_id", visitorId);
+    form.append("document", file);
+    return request<{ document: RoomDocument }>(`/api/rooms/${sessionId}/documents`, { method: "POST", body: form });
+  },
+  deleteDocument: (sessionId: string, identity: Identity, documentId: number) =>
+    request<{ ok: boolean }>(`/api/rooms/${sessionId}/documents/${documentId}`, {
+      method: "DELETE",
+      body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token }),
+    }),
   updateTodo: (sessionId: string, visitorId: string, todo: Pick<Todo, "id" | "title" | "assignee" | "status" | "due_at">) =>
     request<{ todo: Todo }>(`/api/rooms/${sessionId}/todos/${todo.id}`, {
       method: "PUT",

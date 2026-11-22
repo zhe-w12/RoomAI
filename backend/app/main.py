@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from .config import (
     AVAILABLE_MODELS,
+    DOCUMENT_DIR,
     FALLBACK_TRIGGER_MESSAGES,
     FRONTEND_ORIGIN,
     EVALUATION_DIMENSIONS,
@@ -44,6 +45,15 @@ from .services.analysis import analyze_room
 from .services.report import generate_room_report, markdown_to_docx
 from .services.voting import propose_vote
 from .services.web_search import SearchNotConfigured, SearchUnavailable, search_web
+from .services.documents import (
+    MAX_DOCUMENT_BYTES,
+    MAX_DOCUMENT_CHARS,
+    SUPPORTED_EXTENSIONS,
+    extract_document_text,
+    retrieve_document_chunks,
+    split_into_chunks,
+    token_vector,
+)
 
 
 app = FastAPI(title="RoomAI API", version="0.1.0")
@@ -55,6 +65,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DOCUMENT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 ALLOWED_IMAGES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
@@ -192,6 +203,11 @@ class FinishRoomRequest(FinishReviewRequest):
 class ReadMentionsRequest(BaseModel):
     visitor_id: str
     message_ids: list[int] | None = None
+
+
+class DocumentDeleteRequest(BaseModel):
+    visitor_id: str
+    owner_token: str | None = None
 
 
 _idle_tasks: dict[str, asyncio.Task] = {}
@@ -596,6 +612,17 @@ def _safe_remove_room_uploads(session_id: str) -> None:
         shutil.rmtree(target)
 
 
+def _safe_remove_room_documents(session_id: str) -> None:
+    root = DOCUMENT_DIR.resolve()
+    candidate = DOCUMENT_DIR / session_id
+    if candidate.is_symlink():
+        candidate.unlink(missing_ok=True)
+        return
+    target = candidate.resolve()
+    if target.parent == root and target.is_dir():
+        shutil.rmtree(target)
+
+
 async def cleanup_inactive_rooms() -> None:
     now = datetime.now(timezone.utc)
     warning_cutoff = now - timedelta(
@@ -661,6 +688,10 @@ async def cleanup_inactive_rooms() -> None:
             _safe_remove_room_uploads(session_id)
         except OSError:
             logger.exception("Could not remove uploads for a cleaned room")
+        try:
+            _safe_remove_room_documents(session_id)
+        except OSError:
+            logger.exception("Could not remove documents for a cleaned room")
 
 
 async def room_cleanup_loop() -> None:
@@ -1371,19 +1402,35 @@ async def generate_agent_reply(
         structured_context = json.dumps([dict(row) for row in idea_rows], ensure_ascii=False) if idea_rows else None
         answer = None
         if prompt == "__HELP__":
-            answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/联网评估 结合外部资料核对方向；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/待办提取下一步。也可以直接 @RoomAI 提问。"
+            answer = "可以试试这些快捷指令：/总结 梳理共识、分歧和待办；/评估 评估核心想法；/联网评估 结合外部资料核对方向；/投票整理待决定的问题；/对比并排比较候选方案；/画图生成方案流程；/挑战检查风险；/待办提取下一步。也可以直接 @RoomAI 提问；房间资料会按问题自动检索。"
         else:
-            external_sources = None
+            references = retrieve_document_chunks(
+                session_id,
+                " ".join([
+                    room["topic"],
+                    research_query or " ".join(
+                        item["content"] for item in history
+                        if item.get("sender_type") == "user" and item.get("content")
+                    ),
+                    prompt,
+                ])[-1800:],
+            )
+            search_notice = ""
             if research_query is not None:
                 query = " ".join(research_query.split())[:500] or room["topic"]
                 try:
-                    external_sources = await search_web(f"{room['topic']} {query}")
+                    web_sources = await search_web(f"{room['topic']} {query}")
                 except SearchNotConfigured:
-                    answer = "联网评估尚未配置检索服务。请在服务器 `.env` 中设置 `TAVILY_API_KEY` 后重试。"
+                    web_sources = []
+                    search_notice = "服务器尚未配置联网检索；以下回答只依据讨论内容和房间资料。"
                 except SearchUnavailable:
-                    answer = "联网检索暂时不可用，本次没有使用外部资料。你可以稍后重试，或使用 `/评估` 先按讨论内容评估。"
-                if external_sources == []:
-                    answer = "没有检索到可用来源。可以换更具体的关键词后重试，或使用 `/评估` 按讨论内容评估。"
+                    web_sources = []
+                    search_notice = "联网检索暂时不可用；以下回答只依据讨论内容和房间资料。"
+                references.extend(web_sources)
+                if not web_sources and not references:
+                    answer = search_notice or "没有检索到可用来源。可以换更具体的关键词后重试，或使用 `/评估` 按讨论内容评估。"
+                elif not web_sources:
+                    prompt += f"\n{search_notice or '没有检索到外部网页来源，请仅使用下方房间资料。'}"
             if answer is None:
                 answer = await answer_room_prompt(
                     room["topic"], history, prompt, model=room["model"], session_id=session_id,
@@ -1391,13 +1438,20 @@ async def generate_agent_reply(
                     summary=json.dumps(summary_context, ensure_ascii=False) if summary_context else None,
                     structured_context=structured_context,
                     member_names=member_names,
-                    external_sources=external_sources,
+                    external_sources=references,
                 )
-                if answer and external_sources:
+                if answer and references:
+                    source_lines = []
+                    for index, source in enumerate(references, 1):
+                        if source.get("kind") == "document":
+                            source_lines.append(f"- [来源 {index}] 房间资料《{source['title']}》，第 {source['chunk_index']} 段")
+                        else:
+                            source_lines.append(
+                                f"- [来源 {index}] [{source['title']}]({source['url']})"
+                                + (f"（{source['published_date']}）" if source.get("published_date") else "")
+                            )
                     answer += "\n\n**参考来源**\n" + "\n".join(
-                        f"- [来源 {index}] [{item['title']}]({item['url']})"
-                        + (f"（{item['published_date']}）" if item["published_date"] else "")
-                        for index, item in enumerate(external_sources, 1)
+                        source_lines
                     )
             if answer:
                 suggestions = re.findall(r"\[\[suggest_mention:([^\]]+)\]\]", answer)
@@ -1416,6 +1470,127 @@ async def generate_agent_reply(
             session_id,
             {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": False},
         )
+
+
+def _room_document_list(session_id: str) -> list[dict]:
+    with database() as connection:
+        rows = connection.execute(
+            """SELECT d.id, d.filename, d.media_type, d.size, d.chunk_count, d.created_at,
+                      v.nickname AS uploaded_by
+               FROM room_documents d JOIN visitors v ON v.visitor_id = d.visitor_id
+               WHERE d.session_id = ? ORDER BY d.created_at DESC, d.id DESC""",
+            (session_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/rooms/{session_id}/documents")
+def get_room_documents(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    return {"documents": _room_document_list(session_id)}
+
+
+@app.post("/api/rooms/{session_id}/documents")
+async def upload_room_document(
+    session_id: str,
+    visitor_id: str = Form(...),
+    document: UploadFile = File(...),
+) -> dict:
+    visitor = ensure_visitor(session_id, visitor_id)
+    if ensure_room(session_id)["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已结束，无法添加资料")
+    filename = (document.filename or "").replace("\\", "/").split("/")[-1].strip()[:180]
+    extension = Path(filename).suffix.lower()
+    if not filename or extension not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="支持 PDF、Word、PowerPoint、TXT 和 Markdown 文件")
+    data = await document.read(MAX_DOCUMENT_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=422, detail="文件内容为空")
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(status_code=413, detail="单个资料文件不能超过 10MB")
+    try:
+        extracted = await asyncio.to_thread(extract_document_text, filename, data)
+    except Exception as error:
+        logger.info("Could not extract room document (%s)", extension)
+        raise HTTPException(status_code=422, detail="无法读取这个文件，请确认文件未损坏") from error
+    if not extracted:
+        raise HTTPException(status_code=422, detail="文件中没有可检索的文字；扫描版 PDF 暂不支持 OCR")
+    if len(extracted) > MAX_DOCUMENT_CHARS:
+        raise HTTPException(status_code=413, detail="提取文本超过 30 万字，请拆分文件后再添加")
+    chunks = split_into_chunks(extracted)
+    with database() as connection:
+        document_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM room_documents WHERE session_id = ?", (session_id,)
+        ).fetchone()["count"]
+    if document_count >= 20:
+        raise HTTPException(status_code=409, detail="每个房间最多保存 20 份讨论资料")
+
+    stored_name = f"{uuid.uuid4().hex}{extension}"
+    room_folder = DOCUMENT_DIR / session_id
+    target = (room_folder / stored_name).resolve()
+    if not target.is_relative_to(DOCUMENT_DIR.resolve() / session_id):
+        raise HTTPException(status_code=422, detail="文件路径无效")
+    room_folder.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(target.write_bytes, data)
+    media_type = {
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".txt": "text/plain",
+        ".md": "text/markdown",
+    }[extension]
+    created_at = now_iso()
+    try:
+        with database() as connection:
+            cursor = connection.execute(
+                """INSERT INTO room_documents
+                   (session_id, visitor_id, filename, storage_path, media_type, size, chunk_count, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session_id, visitor["visitor_id"], filename, f"{session_id}/{stored_name}", media_type, len(data), len(chunks), created_at),
+            )
+            document_id = cursor.lastrowid
+            connection.executemany(
+                "INSERT INTO document_chunks (document_id, chunk_index, content, vector_json) VALUES (?, ?, ?, ?)",
+                [(document_id, index, chunk, token_vector(chunk)) for index, chunk in enumerate(chunks)],
+            )
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    touch_room_activity(session_id)
+    documents = _room_document_list(session_id)
+    await manager.broadcast(session_id, {"type": "documents_update", "documents": documents})
+    created = next(item for item in documents if item["id"] == document_id)
+    return {"document": created}
+
+
+@app.delete("/api/rooms/{session_id}/documents/{document_id}")
+async def delete_room_document(session_id: str, document_id: int, payload: DocumentDeleteRequest) -> dict:
+    visitor = ensure_visitor(session_id, payload.visitor_id)
+    ensure_room(session_id)
+    with database() as connection:
+        row = connection.execute(
+            "SELECT id, visitor_id, storage_path FROM room_documents WHERE session_id = ? AND id = ?",
+            (session_id, document_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="找不到这份讨论资料")
+    if row["visitor_id"] != payload.visitor_id:
+        if not payload.owner_token:
+            raise HTTPException(status_code=403, detail="只有上传者或房主可以删除这份资料")
+        ensure_owner(session_id, payload.visitor_id, payload.owner_token)
+    stored_path = (DOCUMENT_DIR / row["storage_path"]).resolve()
+    if not stored_path.is_relative_to(DOCUMENT_DIR.resolve() / session_id):
+        raise HTTPException(status_code=422, detail="资料路径无效")
+    with database() as connection:
+        connection.execute(
+            "DELETE FROM room_documents WHERE session_id = ? AND id = ?", (session_id, document_id)
+        )
+    if stored_path.is_file() and not stored_path.is_symlink():
+        stored_path.unlink(missing_ok=True)
+    touch_room_activity(session_id)
+    documents = _room_document_list(session_id)
+    await manager.broadcast(session_id, {"type": "documents_update", "documents": documents})
+    return {"ok": True}
 
 
 @app.post("/api/rooms/{session_id}/upload")

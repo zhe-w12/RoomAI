@@ -11,6 +11,7 @@ dist/
 *.sqlite3
 *.db
 backend/uploads/
+backend/documents/
 backend/data/
 .DS_Store
 Thumbs.db
