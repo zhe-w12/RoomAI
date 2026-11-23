@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS rooms (
     password_hash TEXT NOT NULL DEFAULT '',
     template_id TEXT NOT NULL DEFAULT 'general',
     model TEXT NOT NULL,
+    llm_base_url TEXT NOT NULL DEFAULT '',
+    llm_api_key TEXT NOT NULL DEFAULT '',
     phase TEXT NOT NULL DEFAULT 'diverge',
     prep_checklist TEXT NOT NULL DEFAULT '[]',
     closed_at TEXT,
@@ -260,6 +262,10 @@ def initialize_database() -> None:
             connection.execute("ALTER TABLE rooms ADD COLUMN cleanup_warning_sent_at TEXT")
         if "last_guidance_at" not in room_columns:
             connection.execute("ALTER TABLE rooms ADD COLUMN last_guidance_at TEXT")
+        if "llm_base_url" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN llm_base_url TEXT NOT NULL DEFAULT ''")
+        if "llm_api_key" not in room_columns:
+            connection.execute("ALTER TABLE rooms ADD COLUMN llm_api_key TEXT NOT NULL DEFAULT ''")
         connection.execute("UPDATE rooms SET last_activity_at = created_at WHERE last_activity_at IS NULL")
         idea_columns = {row[1] for row in connection.execute("PRAGMA table_info(ideas)")}
         if "strengths" not in idea_columns:

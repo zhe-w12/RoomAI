@@ -1,7 +1,7 @@
 import { Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowDown, ArrowRight, ArrowUp, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Copy, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Settings2, Sparkles, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
-import { api, FinishReview, Identity, Idea, IdeaStatus, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
+import { api, FinishReview, Identity, Idea, IdeaStatus, LlmConfig, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import { memberColor, memberColorAt } from "../lib/memberColor";
 import MarkdownContent from "../components/MarkdownContent";
 import TodoCard from "../components/TodoCard";
@@ -104,6 +104,15 @@ export default function RoomPage() {
   const [todoBusyIds, setTodoBusyIds] = useState<number[]>([]);
   const [voteBusyIds, setVoteBusyIds] = useState<number[]>([]);
   const [modelSaving, setModelSaving] = useState(false);
+  const [llmBaseUrl, setLlmBaseUrl] = useState("");
+  const [llmApiKey, setLlmApiKey] = useState("");
+  const [llmModel, setLlmModel] = useState("");
+  const [llmKeyConfigured, setLlmKeyConfigured] = useState(false);
+  const [llmIsCustom, setLlmIsCustom] = useState(false);
+  const [llmLoading, setLlmLoading] = useState(false);
+  const [llmSaving, setLlmSaving] = useState(false);
+  const [llmTesting, setLlmTesting] = useState(false);
+  const [llmMessage, setLlmMessage] = useState("");
   const [prepOpen, setPrepOpen] = useState(true);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [composerValue, setComposerValue] = useState("");
@@ -740,10 +749,94 @@ export default function RoomPage() {
     try {
       await api.setModel(sessionId, identity, model);
       setRoom((current) => current ? { ...current, model } : current);
+      // 切到预设模型会清除自定义配置，同步刷新自定义表单
+      void loadLlmConfig();
     } catch (err) {
       setError(err instanceof Error ? err.message : "切换模型失败");
     } finally {
       setModelSaving(false);
+    }
+  }
+
+  async function loadLlmConfig() {
+    if (!identity || !room) return;
+    setLlmLoading(true);
+    try {
+      const config: LlmConfig = await api.getLlmConfig(sessionId, identity.visitor_id);
+      setLlmBaseUrl(config.base_url);
+      setLlmModel(config.model);
+      setLlmKeyConfigured(config.api_key_configured);
+      setLlmIsCustom(config.is_custom);
+      setLlmApiKey("");
+      setLlmMessage("");
+    } catch {
+      // 加载失败不打断设置面板，只是不显示已有值
+    } finally {
+      setLlmLoading(false);
+    }
+  }
+
+  useEffect(() => { if (settingsOpen) void loadLlmConfig(); }, [settingsOpen]);
+
+  async function saveLlmConfig() {
+    if (!identity || !room || room.closed_at || !identity.owner_token || llmSaving) return;
+    const baseUrl = llmBaseUrl.trim();
+    const model = llmModel.trim();
+    if (!baseUrl || !model) {
+      setLlmMessage("请把 API 地址和模型名称填好。");
+      return;
+    }
+    if (!llmApiKey.trim() && !llmKeyConfigured) {
+      setLlmMessage("请填写 API 密钥。");
+      return;
+    }
+    setLlmSaving(true);
+    setLlmMessage("");
+    try {
+      const config = await api.updateLlmConfig(sessionId, identity, { base_url: baseUrl, api_key: llmApiKey.trim(), model });
+      setRoom((current) => current ? { ...current, model: config.model } : current);
+      setLlmKeyConfigured(config.api_key_configured);
+      setLlmIsCustom(config.is_custom);
+      setLlmApiKey("");
+      setLlmMessage("已保存，之后的新调用会用这个配置。");
+    } catch (err) {
+      setLlmMessage(err instanceof Error ? err.message : "保存失败");
+    } finally {
+      setLlmSaving(false);
+    }
+  }
+
+  async function clearLlmConfig() {
+    if (!identity || !room || room.closed_at || !identity.owner_token || llmSaving) return;
+    setLlmSaving(true);
+    setLlmMessage("");
+    try {
+      const config = await api.updateLlmConfig(sessionId, identity, { base_url: "", api_key: "", model: "" });
+      setRoom((current) => current ? { ...current, model: config.model } : current);
+      setLlmBaseUrl("");
+      setLlmModel(config.model);
+      setLlmKeyConfigured(false);
+      setLlmIsCustom(false);
+      setLlmApiKey("");
+      setLlmMessage("已恢复服务器默认配置。");
+    } catch (err) {
+      setLlmMessage(err instanceof Error ? err.message : "恢复失败");
+    } finally {
+      setLlmSaving(false);
+    }
+  }
+
+  async function testLlmConfig() {
+    if (!identity || !room || room.closed_at || !identity.owner_token || llmTesting) return;
+    setLlmTesting(true);
+    setLlmMessage("");
+    try {
+      const result = await api.testLlmConfig(sessionId, identity, { base_url: llmBaseUrl.trim(), api_key: llmApiKey.trim(), model: llmModel.trim() });
+      setLlmMessage(result.ok ? `连接成功，模型回复：${result.reply || "（空）"}` : (result.error || "连接失败"));
+    } catch (err) {
+      setLlmMessage(err instanceof Error ? err.message : "测试失败");
+    } finally {
+      setLlmTesting(false);
     }
   }
 
@@ -1218,7 +1311,24 @@ export default function RoomPage() {
           <select id="model-select" value={room.model} disabled={!identity.owner_token || Boolean(room.closed_at) || modelSaving || room.available_models.length < 2} onChange={(event) => void changeModel(event.target.value)}>
             {room.available_models.map((model) => <option key={model} value={model}>{model}</option>)}
           </select>
-          <p className="field-note">{identity.owner_token ? "切换后仅影响之后的新调用。" : "只有房主可以切换模型。"}</p>
+          <p className="field-note">{identity.owner_token ? "切换后仅影响之后的新调用；切到预设模型会清除下面的自定义配置。" : "只有房主可以切换模型。"}</p>
+        </div>
+        <div className="settings-block">
+          <p className="field">自定义大模型</p>
+          <p className="field-note">{llmIsCustom ? "当前房间正在用下面的自定义配置。" : "不填就用服务器默认配置；填了之后，这个房间的 AI 调用都走自定义地址。"}</p>
+          <label className="field" htmlFor="llm-base-url">API 地址</label>
+          <input id="llm-base-url" type="url" value={llmBaseUrl} disabled={!identity.owner_token || Boolean(room.closed_at) || llmLoading} onChange={(event) => setLlmBaseUrl(event.target.value)} placeholder="https://api.deepseek.com/v1" autoComplete="off" />
+          <label className="field" htmlFor="llm-api-key">API 密钥</label>
+          <input id="llm-api-key" type="password" value={llmApiKey} disabled={!identity.owner_token || Boolean(room.closed_at) || llmLoading} onChange={(event) => setLlmApiKey(event.target.value)} placeholder={llmKeyConfigured ? "已配置，留空表示沿用" : "sk-..."} autoComplete="off" />
+          <label className="field" htmlFor="llm-model">模型名称</label>
+          <input id="llm-model" type="text" value={llmModel} disabled={!identity.owner_token || Boolean(room.closed_at) || llmLoading} onChange={(event) => setLlmModel(event.target.value)} placeholder="deepseek-chat" autoComplete="off" />
+          <div className="llm-config-actions">
+            <button className="btn" disabled={!identity.owner_token || Boolean(room.closed_at) || llmTesting || llmSaving} onClick={() => void testLlmConfig()}>{llmTesting ? "测试中…" : "测试连接"}</button>
+            <button className="btn btn-primary" disabled={!identity.owner_token || Boolean(room.closed_at) || llmTesting || llmSaving} onClick={() => void saveLlmConfig()}>{llmSaving ? "保存中…" : "保存配置"}</button>
+            {llmIsCustom && <button className="btn" disabled={!identity.owner_token || Boolean(room.closed_at) || llmTesting || llmSaving} onClick={() => void clearLlmConfig()}>恢复服务器默认</button>}
+          </div>
+          {llmMessage && <p className="field-note">{llmMessage}</p>}
+          {!identity.owner_token && <p className="field-note">只有房主可以设置大模型。</p>}
         </div>
         <div className="settings-block">
           <p className="field">红队质疑</p>

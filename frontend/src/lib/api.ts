@@ -86,6 +86,13 @@ export type RoomUsage = {
   cost_configured: boolean;
 };
 
+export type LlmConfig = {
+  base_url: string;
+  model: string;
+  api_key_configured: boolean;
+  is_custom: boolean;
+};
+
 export type RoomDocument = {
   id: number;
   filename: string;
@@ -267,6 +274,18 @@ export const api = {
     request<{ model: string }>(`/api/rooms/${sessionId}/model`, {
       method: "PUT",
       body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, model }),
+    }),
+  getLlmConfig: (sessionId: string, visitorId: string) =>
+    request<LlmConfig>(`/api/rooms/${sessionId}/llm-config?visitor_id=${encodeURIComponent(visitorId)}`),
+  updateLlmConfig: (sessionId: string, identity: Identity, config: { base_url: string; api_key: string; model: string }) =>
+    request<LlmConfig>(`/api/rooms/${sessionId}/llm-config`, {
+      method: "PUT",
+      body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, ...config }),
+    }),
+  testLlmConfig: (sessionId: string, identity: Identity, config: { base_url: string; api_key: string; model: string }) =>
+    request<{ ok: boolean; reply?: string; error?: string }>(`/api/rooms/${sessionId}/llm-config/test`, {
+      method: "POST",
+      body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token, ...config }),
     }),
   setRedTeam: (sessionId: string, identity: Identity, enabled: boolean) =>
     request<{ enabled: boolean }>(`/api/rooms/${sessionId}/red-team`, {

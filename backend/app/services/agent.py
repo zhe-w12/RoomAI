@@ -56,9 +56,30 @@ async def complete_chat(
     json_mode: bool = False,
     temperature: float = 0.45,
     on_delta: Callable[[str], Awaitable[None] | None] | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> dict | None:
-    """Call the configured OpenAI-compatible endpoint, retry once, and record usage."""
-    if not MODEL_API_KEY:
+    """Call the configured OpenAI-compatible endpoint, retry once, and record usage.
+
+    Endpoint resolution: explicit base_url/api_key arguments win (used to test an
+    unsaved config); otherwise a room's own saved config wins when session_id is
+    given; otherwise the server environment defaults apply.
+    """
+    effective_base_url = (base_url or "").strip().rstrip("/") or None
+    effective_api_key = (api_key or "").strip() or None
+    if effective_base_url is None and effective_api_key is None and session_id:
+        with database() as connection:
+            row = connection.execute(
+                "SELECT llm_base_url, llm_api_key FROM rooms WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        if row:
+            effective_base_url = (row["llm_base_url"] or "").strip().rstrip("/") or None
+            effective_api_key = (row["llm_api_key"] or "").strip() or None
+    if effective_base_url is None:
+        effective_base_url = MODEL_BASE_URL
+    if effective_api_key is None:
+        effective_api_key = MODEL_API_KEY
+    if not effective_api_key:
         return None
     selected_model = model or MODEL_NAME
     body = {"model": selected_model, "temperature": temperature, "messages": messages}
@@ -70,12 +91,12 @@ async def complete_chat(
     for attempt in range(2):
         try:
             async with httpx.AsyncClient(timeout=MODEL_TIMEOUT_SECONDS) as client:
-                headers = {"Authorization": f"Bearer {MODEL_API_KEY}"}
+                headers = {"Authorization": f"Bearer {effective_api_key}"}
                 if on_delta:
                     chunks: list[str] = []
                     stream_usage = None
                     async with client.stream(
-                        "POST", f"{MODEL_BASE_URL}/chat/completions", headers=headers, json=body
+                        "POST", f"{effective_base_url}/chat/completions", headers=headers, json=body
                     ) as response:
                         response.raise_for_status()
                         async for line in response.aiter_lines():
@@ -105,7 +126,7 @@ async def complete_chat(
                     }
                 else:
                     response = await client.post(
-                        f"{MODEL_BASE_URL}/chat/completions",
+                        f"{effective_base_url}/chat/completions",
                         headers=headers,
                         json=body,
                     )

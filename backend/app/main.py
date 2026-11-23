@@ -40,7 +40,7 @@ from .config import (
 from .database import database, initialize_database
 from .realtime import manager, visitor_for_session
 from .services.brief import ROOM_TEMPLATES, create_room_brief
-from .services.agent import COMMAND_PROMPTS
+from .services.agent import COMMAND_PROMPTS, complete_chat
 from .services.report import generate_room_report, markdown_to_docx
 from .services.web_search import SearchNotConfigured, SearchUnavailable, search_web
 from .services.room_graph import delete_room_agent_checkpoint, run_room_agent, start_room_agent_graph, stop_room_agent_graph
@@ -169,6 +169,22 @@ class ModelRequest(BaseModel):
     visitor_id: str
     owner_token: str = Field(min_length=1)
     model: str = Field(min_length=1, max_length=120)
+
+
+class LlmConfigRequest(BaseModel):
+    visitor_id: str
+    owner_token: str = Field(min_length=1)
+    base_url: str = Field(default="", max_length=500)
+    api_key: str = Field(default="", max_length=500)
+    model: str = Field(default="", max_length=120)
+
+
+class LlmTestRequest(BaseModel):
+    visitor_id: str
+    owner_token: str = Field(min_length=1)
+    base_url: str = Field(default="", max_length=500)
+    api_key: str = Field(default="", max_length=500)
+    model: str = Field(default="", max_length=120)
 
 
 class RedTeamRequest(BaseModel):
@@ -2248,12 +2264,97 @@ async def update_model(session_id: str, payload: ModelRequest) -> dict:
     if payload.model not in available:
         raise HTTPException(status_code=422, detail="这个模型不在可选列表中")
     with database() as connection:
-        connection.execute(
-            "UPDATE rooms SET model = ?, last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
-            (payload.model, now_iso(), session_id),
-        )
+        if payload.model == room["model"]:
+            # 选的是当前模型，不动自定义配置
+            connection.execute(
+                "UPDATE rooms SET last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+                (now_iso(), session_id),
+            )
+        else:
+            # 切到预设模型就是回到服务器默认地址，清除房间自定义配置
+            connection.execute(
+                "UPDATE rooms SET model = ?, llm_base_url = '', llm_api_key = '', last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+                (payload.model, now_iso(), session_id),
+            )
     await manager.broadcast(session_id, {"type": "model_changed", "model": payload.model})
     return {"model": payload.model}
+
+
+@app.get("/api/rooms/{session_id}/llm-config")
+async def get_llm_config(session_id: str, visitor_id: str) -> dict:
+    ensure_visitor(session_id, visitor_id)
+    room = ensure_room(session_id)
+    base_url = (room.get("llm_base_url") or "").strip()
+    return {
+        "base_url": base_url,
+        "model": room["model"],
+        "api_key_configured": bool((room.get("llm_api_key") or "").strip()),
+        "is_custom": bool(base_url),
+    }
+
+
+@app.put("/api/rooms/{session_id}/llm-config")
+async def update_llm_config(session_id: str, payload: LlmConfigRequest) -> dict:
+    visitor = ensure_visitor(session_id, payload.visitor_id)
+    room = ensure_room(session_id)
+    if not visitor["is_owner"] or token_hash(payload.owner_token) != room["owner_token_hash"]:
+        raise HTTPException(status_code=403, detail="只有房主可以设置大模型")
+    if room["closed_at"]:
+        raise HTTPException(status_code=409, detail="讨论已经结束")
+    base_url = payload.base_url.strip().rstrip("/")
+    api_key = payload.api_key.strip()
+    model = payload.model.strip()
+    if not base_url and not api_key:
+        # 地址和密钥都为空 = 恢复服务器默认，模型也回到服务器默认模型
+        with database() as connection:
+            connection.execute(
+                "UPDATE rooms SET llm_base_url = '', llm_api_key = '', model = ?, last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+                (MODEL_NAME, now_iso(), session_id),
+            )
+        await manager.broadcast(session_id, {"type": "model_changed", "model": MODEL_NAME})
+        return {"base_url": "", "model": MODEL_NAME, "api_key_configured": False, "is_custom": False}
+    if not base_url or not model:
+        raise HTTPException(status_code=422, detail="API 地址和模型名称都要填")
+    if not api_key:
+        # 密钥留空时沿用已保存的
+        api_key = (room.get("llm_api_key") or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=422, detail="请填写 API 密钥")
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="API 地址要以 http:// 或 https:// 开头")
+    with database() as connection:
+        connection.execute(
+            "UPDATE rooms SET llm_base_url = ?, llm_api_key = ?, model = ?, last_activity_at = ?, cleanup_warning_sent_at = NULL WHERE session_id = ?",
+            (base_url, api_key, model, now_iso(), session_id),
+        )
+    await manager.broadcast(session_id, {"type": "model_changed", "model": model})
+    return {"base_url": base_url, "model": model, "api_key_configured": True, "is_custom": True}
+
+
+@app.post("/api/rooms/{session_id}/llm-config/test")
+async def test_llm_config(session_id: str, payload: LlmTestRequest) -> dict:
+    visitor = ensure_visitor(session_id, payload.visitor_id)
+    room = ensure_room(session_id)
+    if not visitor["is_owner"] or token_hash(payload.owner_token) != room["owner_token_hash"]:
+        raise HTTPException(status_code=403, detail="只有房主可以测试大模型")
+    # 空字段用房间已保存的配置补齐，方便一键测试已保存的配置
+    base_url = (payload.base_url.strip() or (room.get("llm_base_url") or "").strip()).rstrip("/")
+    api_key = payload.api_key.strip() or (room.get("llm_api_key") or "").strip()
+    model = payload.model.strip() or room["model"]
+    if not base_url or not api_key:
+        return {"ok": False, "error": "请先填写 API 地址和密钥"}
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="API 地址要以 http:// 或 https:// 开头")
+    result = await complete_chat(
+        [{"role": "user", "content": "只回复一个字：好"}],
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        temperature=0,
+    )
+    if result:
+        return {"ok": True, "reply": result["content"][:100]}
+    return {"ok": False, "error": "连接失败，请检查地址、密钥和模型名称"}
 
 
 @app.websocket("/ws/{session_id}")

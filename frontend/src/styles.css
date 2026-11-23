@@ -365,9 +365,12 @@ a { color: inherit; text-decoration: none; }
 .settings h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.4px; }
 .settings-block { margin-top: 20px; }
 .settings-block .field { margin: 0 0 7px; }
-.settings-block select { width: 100%; height: 44px; padding: 0 12px; color: var(--ink); border: 1px solid transparent; border-radius: 12px; background: #f7f7f7; font-size: 13.5px; outline: none; }
-.settings-block select:focus { border-color: #111; background: #fff; box-shadow: var(--shadow-soft); }
-.settings-block select:disabled { color: var(--muted); background: var(--bg-subtle); }
+.settings-block select, .settings-block input { width: 100%; height: 44px; padding: 0 12px; color: var(--ink); border: 1px solid transparent; border-radius: 12px; background: #f7f7f7; font-size: 13.5px; outline: none; }
+.settings-block select:focus, .settings-block input:focus { border-color: #111; background: #fff; box-shadow: var(--shadow-soft); }
+.settings-block select:disabled, .settings-block input:disabled { color: var(--muted); background: var(--bg-subtle); }
+.settings-block input::placeholder { color: var(--faint); }
+.llm-config-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.llm-config-actions .btn { min-height: 38px; padding: 0 14px; font-size: 13px; }
 .settings-usage { display: grid; gap: 4px; margin-top: 20px; padding: 14px; border: 1px solid rgba(0, 0, 0, .05); border-radius: 14px; background: var(--bg-subtle); }
 .settings-usage b { color: var(--ink-2); font-size: 12px; font-weight: 600; }
 .settings-usage span { font-size: 20px; font-weight: 700; letter-spacing: -.5px; }
