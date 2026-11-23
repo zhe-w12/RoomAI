@@ -6,6 +6,7 @@ from io import BytesIO
 
 from ..database import database
 from .agent import complete_chat
+from .diagram import sanitize_mermaid_code
 
 
 def _cell(value) -> str:
@@ -207,9 +208,7 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
             target = "待定"
         timeline.append({"milestone": milestone, "target": target, "basis": basis})
     retrospective = str(generated.get("retrospective", "")).strip()[:3000]
-    diagram = str(generated.get("mermaid", "")).strip()[:6000]
-    if not re.fullmatch(r"(?:flowchart|graph|mindmap|sequenceDiagram|classDiagram|stateDiagram-v2)[^\n]*[\s\S]*", diagram):
-        diagram = ""
+    diagram = sanitize_mermaid_code(str(generated.get("mermaid", "")))
 
     total_messages = sum(int(item["message_count"]) for item in participants)
     minutes = [f"# RoomAI 立项纪要：{room['topic']}", "", "## 1. 讨论主题与参与人", f"讨论主题：{room['topic']}", "", "| 参与人 | 身份 | 发言数 |", "|---|---|---:|"]

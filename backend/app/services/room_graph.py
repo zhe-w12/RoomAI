@@ -15,9 +15,10 @@ from langgraph.graph import END, START, StateGraph
 from ..config import LANGGRAPH_CHECKPOINT_PATH
 from .analysis import analyze_room
 from .agent import answer_room_prompt
+from .diagram import generate_mermaid_diagram
 from .voting import propose_vote
 
-AgentMode = Literal["conversation", "research", "analysis", "vote"]
+AgentMode = Literal["conversation", "research", "analysis", "vote", "diagram"]
 
 
 class AgentTurn(TypedDict):
@@ -49,6 +50,7 @@ class RoomAgentRequest:
     force_analysis: bool
     auto_guidance: bool
     on_delta: Callable[[str], Awaitable[None] | None] | None
+    diagram_type: str = "flowchart"
     output: str | dict[str, Any] | None = None
 
 
@@ -154,6 +156,23 @@ async def _vote_node(state: RoomAgentState) -> dict:
     return {"turns": _checkpoint_turns(state, request, response), "last_route": "vote"}
 
 
+async def _diagram_node(state: RoomAgentState) -> dict:
+    request = _current_request()
+    result = await generate_mermaid_diagram(
+        request.topic,
+        request.history,
+        request.prompt,
+        diagram_type=request.diagram_type,
+        model=request.model,
+        session_id=request.session_id,
+    )
+    request.output = result
+    if not result:
+        return {"last_route": "diagram"}
+    response = result.get("explanation") or "已生成方案图。"
+    return {"turns": _checkpoint_turns(state, request, response), "last_route": "diagram"}
+
+
 async def start_room_agent_graph() -> None:
     global _checkpoint_context, _checkpointer, _graph
     if _graph is not None:
@@ -167,16 +186,18 @@ async def start_room_agent_graph() -> None:
     builder.add_node("research", _answer_node)
     builder.add_node("analysis", _analysis_node)
     builder.add_node("vote", _vote_node)
+    builder.add_node("diagram", _diagram_node)
     builder.add_edge(START, "supervisor")
     builder.add_conditional_edges(
         "supervisor",
         _route,
-        {"conversation": "conversation", "research": "research", "analysis": "analysis", "vote": "vote"},
+        {"conversation": "conversation", "research": "research", "analysis": "analysis", "vote": "vote", "diagram": "diagram"},
     )
     builder.add_edge("conversation", END)
     builder.add_edge("research", END)
     builder.add_edge("analysis", END)
     builder.add_edge("vote", END)
+    builder.add_edge("diagram", END)
     _graph = builder.compile(checkpointer=_checkpointer)
 
 
@@ -204,6 +225,7 @@ async def run_room_agent(
     mode: AgentMode = "conversation",
     force_analysis: bool = False,
     auto_guidance: bool = True,
+    diagram_type: str = "flowchart",
     on_delta: Callable[[str], Awaitable[None] | None] | None = None,
 ) -> str | dict[str, Any] | None:
     if _graph is None:
@@ -222,6 +244,7 @@ async def run_room_agent(
         mode=mode,
         force_analysis=force_analysis,
         auto_guidance=auto_guidance,
+        diagram_type=diagram_type,
         on_delta=on_delta,
     )
     context_token = _request_context.set(request)

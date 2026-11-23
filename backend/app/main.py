@@ -1698,6 +1698,8 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         asyncio.create_task(publish_room_analysis(session_id, auto_vote=False, auto_guidance=False))
     elif content.startswith("/对比"):
         asyncio.create_task(publish_idea_comparison(session_id))
+    elif content.startswith("/画图"):
+        asyncio.create_task(publish_diagram(session_id, content[len("/画图"):].strip()))
     elif prompt:
         asyncio.create_task(generate_agent_reply(session_id, prompt))
     elif quote_prompt:
@@ -1768,6 +1770,71 @@ async def publish_idea_comparison(session_id: str) -> None:
                     lines.append("| " + " | ".join(_comparison_cell(value) for value in cells) + " |")
                 lines.extend(["", "评分与优势/代价来自房间已记录的评估；空缺项表示讨论中尚无明确记录。表格用于辅助讨论，不代表最终决定。"])
                 answer = "\n".join(lines)
+        message = create_message_record(session_id, None, "RoomAI", "agent", answer, now_iso())
+        await manager.broadcast(session_id, {"type": "message", "message": message})
+    except Exception:
+        return
+    finally:
+        await manager.broadcast(
+            session_id,
+            {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": False},
+        )
+
+
+_DIAGRAM_TYPE_KEYWORDS = (
+    ("思维导图", "mindmap"), ("mindmap", "mindmap"),
+    ("时序图", "sequenceDiagram"), ("sequence", "sequenceDiagram"),
+    ("类图", "classDiagram"), ("class", "classDiagram"),
+    ("状态图", "stateDiagram-v2"), ("state", "stateDiagram-v2"),
+    ("流程图", "flowchart"), ("flowchart", "flowchart"),
+)
+
+
+def _diagram_type_from_detail(detail: str) -> str:
+    lowered = detail.casefold()
+    for keyword, diagram_type in _DIAGRAM_TYPE_KEYWORDS:
+        if keyword in lowered:
+            return diagram_type
+    return "flowchart"
+
+
+async def publish_diagram(session_id: str, detail: str) -> None:
+    await manager.broadcast(
+        session_id,
+        {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": True},
+    )
+    try:
+        room = ensure_room(session_id)
+        if room["closed_at"]:
+            return
+        with database() as connection:
+            history = [dict(row) for row in connection.execute(
+                """SELECT m.id, m.sender_name, m.sender_type, m.content, m.image_path, m.image_summary, m.is_recalled,
+                          r.sender_name AS reply_sender_name, r.content AS reply_content
+                   FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id
+                   WHERE m.session_id = ? ORDER BY m.id DESC LIMIT 30""",
+                (session_id,),
+            ).fetchall()]
+        history.reverse()
+        subject = detail or "讨论里已经确定的方案的主要步骤"
+        result = await run_room_agent(
+            session_id=session_id,
+            topic=room["topic"],
+            history=history,
+            prompt=subject,
+            model=room["model"],
+            phase=room["phase"],
+            mode="diagram",
+            diagram_type=_diagram_type_from_detail(detail),
+        )
+        if isinstance(result, dict) and result.get("code"):
+            parts = []
+            if result.get("explanation"):
+                parts.append(str(result["explanation"]))
+            parts.append("```mermaid\n" + str(result["code"]) + "\n```")
+            answer = "\n\n".join(parts)
+        else:
+            answer = "这次画图没成功，可能是模型暂时没响应。可以换个说法再试一次，比如 `/画图 先做小程序 MVP 的流程`。"
         message = create_message_record(session_id, None, "RoomAI", "agent", answer, now_iso())
         await manager.broadcast(session_id, {"type": "message", "message": message})
     except Exception:
