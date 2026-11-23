@@ -1551,14 +1551,16 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         image_path = payload.image_url.removeprefix("/uploads/")
     if not content and not image_path:
         raise HTTPException(status_code=422, detail="消息内容不能为空")
+    reply_targets_agent = False
     if payload.reply_to_message_id is not None:
         with database() as connection:
             replied = connection.execute(
-                "SELECT 1 FROM messages WHERE session_id = ? AND id = ?",
+                "SELECT sender_type FROM messages WHERE session_id = ? AND id = ?",
                 (session_id, payload.reply_to_message_id),
             ).fetchone()
         if not replied:
             raise HTTPException(status_code=404, detail="引用的消息不存在")
+        reply_targets_agent = replied["sender_type"] == "agent"
     rate = _message_rate[visitor["visitor_id"]]
     now_tick = time.monotonic()
     while rate and now_tick - rate[0] >= 10:
@@ -1598,6 +1600,8 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         asyncio.create_task(publish_red_team(session_id, detail))
         return message
     prompt = ai_prompt(content)
+    if prompt is None and reply_targets_agent:
+        prompt = f"请直接回应成员引用的 RoomAI 回复，并回答其补充内容。成员补充：{content}"
     is_vote_request = content.startswith("/投票") or (
         re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE) and "投票" in content
     )
