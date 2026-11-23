@@ -186,8 +186,14 @@ export const api = {
       method: "DELETE",
       body: JSON.stringify({ visitor_id: identity.visitor_id, owner_token: identity.owner_token }),
     }),
-  getMessages: (sessionId: string, visitorId: string, afterMessageId = 0) =>
-    request<Message[]>(`/api/rooms/${sessionId}/messages?visitor_id=${encodeURIComponent(visitorId)}&after_message_id=${afterMessageId}`),
+  getMessages: (sessionId: string, visitorId: string, options: { after?: number; before?: number; around?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams({ visitor_id: visitorId });
+    if (options.after) params.set("after_message_id", String(options.after));
+    if (options.before) params.set("before_message_id", String(options.before));
+    if (options.around) params.set("around_message_id", String(options.around));
+    if (options.limit) params.set("limit", String(options.limit));
+    return request<Message[]>(`/api/rooms/${sessionId}/messages?${params.toString()}`);
+  },
   getSummary: (sessionId: string, visitorId: string) =>
     request<{ latest: SummaryVersion | null; history: SummaryVersion[] }>(`/api/rooms/${sessionId}/summary?visitor_id=${encodeURIComponent(visitorId)}`),
   getIdeas: (sessionId: string, visitorId: string) =>

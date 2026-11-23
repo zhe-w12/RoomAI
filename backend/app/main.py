@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from .config import (
     ANALYSIS_MAX_ATTEMPTS,
+    ANALYSIS_MODEL_NAME,
     ANALYSIS_RETRY_DELAY_SECONDS,
     ANALYSIS_RETRY_FAST_SECONDS,
     AVAILABLE_MODELS,
@@ -389,7 +390,7 @@ async def publish_room_analysis(
                         topic=room["topic"],
                         history=[],
                         prompt="增量分析当前讨论，更新总结、想法评估和下一步。",
-                        model=room["model"],
+                        model=ANALYSIS_MODEL_NAME,
                         phase=room["phase"],
                         mode="analysis",
                         auto_guidance=auto_guidance,
@@ -1201,18 +1202,53 @@ def get_room(session_id: str, visitor_id: str) -> dict:
     }
 
 
+_MESSAGE_SELECT = """SELECT m.*, r.sender_name AS reply_sender_name, r.content AS reply_content,
+              r.is_recalled AS reply_is_recalled,
+              (SELECT group_concat(todo_id, ',') FROM todo_card_items WHERE message_id = m.id) AS todo_ids_raw
+       FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id"""
+
+
 @app.get("/api/rooms/{session_id}/messages")
-def get_messages(session_id: str, visitor_id: str, after_message_id: int = Query(default=0, ge=0)) -> list[dict]:
+def get_messages(
+    session_id: str,
+    visitor_id: str,
+    after_message_id: int = Query(default=0, ge=0),
+    before_message_id: int = Query(default=0, ge=0),
+    around_message_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> list[dict]:
+    """分页取消息：默认取最新 limit 条；before 取更早的；around 取目标前后各半；
+    after（断线补消息）保持不限量返回。"""
     ensure_visitor(session_id, visitor_id)
     with database() as connection:
-        rows = connection.execute(
-            """SELECT m.*, r.sender_name AS reply_sender_name, r.content AS reply_content,
-                      r.is_recalled AS reply_is_recalled,
-                      (SELECT group_concat(todo_id, ',') FROM todo_card_items WHERE message_id = m.id) AS todo_ids_raw
-               FROM messages m LEFT JOIN messages r ON r.id = m.reply_to_message_id
-               WHERE m.session_id = ? AND m.id > ? ORDER BY m.id ASC""",
-            (session_id, after_message_id),
-        ).fetchall()
+        if around_message_id > 0:
+            half = limit // 2
+            before_rows = connection.execute(
+                f"{_MESSAGE_SELECT} WHERE m.session_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?",
+                (session_id, around_message_id, half),
+            ).fetchall()
+            after_rows = connection.execute(
+                f"{_MESSAGE_SELECT} WHERE m.session_id = ? AND m.id >= ? ORDER BY m.id ASC LIMIT ?",
+                (session_id, around_message_id, limit - half),
+            ).fetchall()
+            rows = list(reversed(before_rows)) + list(after_rows)
+        elif before_message_id > 0:
+            rows = connection.execute(
+                f"{_MESSAGE_SELECT} WHERE m.session_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT ?",
+                (session_id, before_message_id, limit),
+            ).fetchall()
+            rows = list(reversed(rows))
+        elif after_message_id > 0:
+            rows = connection.execute(
+                f"{_MESSAGE_SELECT} WHERE m.session_id = ? AND m.id > ? ORDER BY m.id ASC",
+                (session_id, after_message_id),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                f"{_MESSAGE_SELECT} WHERE m.session_id = ? ORDER BY m.id DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+            rows = list(reversed(rows))
         return [message_dict(row) for row in rows]
 
 
@@ -1876,7 +1912,7 @@ async def publish_diagram(session_id: str, detail: str) -> None:
             topic=room["topic"],
             history=history,
             prompt=subject,
-            model=room["model"],
+            model=ANALYSIS_MODEL_NAME,
             phase=room["phase"],
             mode="diagram",
             diagram_type=_diagram_type_from_detail(detail),

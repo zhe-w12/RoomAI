@@ -271,7 +271,9 @@ frontend/src/
           evaluations / summaries / decisions / todos / votes / vote_options /
           vote_records / attachments / usage）+ LangGraph checkpoint
           （thread_id = session_id）+ 图片文件（服务器本地 uploads/，按 session_id 分目录）
-    模型：DeepSeek，经 OpenAI 兼容接口，API Key 只放环境变量；
+    模型：经 OpenAI 兼容接口，API Key 只放环境变量；默认 GLM-5.3-Flash（aiping.cn）；
+          结构化分析（总结/画图）走快模型 GLM-4.7-Flash（免费、非推理，见 ANALYSIS_MODEL_NAME）；
+          模型调用失败时自动切备用模型（FALLBACK_MODEL_NAME，默认同分析模型）；
           图片理解走多模态大模型（OpenAI 兼容 vision 接口，环境变量可换）
     用量：usage 表记每次模型调用的 token 数与估算费用，按 session_id 聚合展示
 ```

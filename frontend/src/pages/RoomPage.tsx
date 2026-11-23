@@ -1,4 +1,4 @@
-import { Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowDown, ArrowRight, ArrowUp, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Copy, Ellipsis, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Settings2, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
 import { api, FinishReview, Identity, Idea, IdeaStatus, LlmConfig, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
@@ -9,6 +9,7 @@ import TodoCard from "../components/TodoCard";
 import VoteCard, { Vote } from "../components/VoteCard";
 
 const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/用户视角", "/待办", "/结束", "/帮助"];
+const MESSAGE_PAGE_SIZE = 100;
 const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
 const atmosphereLabels = { active: "讨论活跃", steady: "节奏平稳", quiet: "讨论偏冷", tense: "存在明显分歧" } as const;
 const ideaStatusLabels: Record<IdeaStatus, string> = { considering: "讨论中", pending: "待定", adopted: "已采纳", rejected: "已否决" };
@@ -145,6 +146,8 @@ export default function RoomPage() {
   const [joinPassword, setJoinPassword] = useState("");
   const [joining, setJoining] = useState(false);
   const [nearBottom, setNearBottom] = useState(true);
+  const [hasOlder, setHasOlder] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState("");
   const [quoteFlash, setQuoteFlash] = useState<number | null>(null);
@@ -161,6 +164,12 @@ export default function RoomPage() {
   const voiceRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const voiceBaseDraftRef = useRef("");
   const lastMessageIdRef = useRef(0);
+  const hasOlderRef = useRef(true);
+  const loadingOlderRef = useRef(false);
+  const viewingOldWindowRef = useRef(false);
+  const reloadingLatestRef = useRef(false);
+  const prevScrollTopRef = useRef(0);
+  const pendingScrollAdjustRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
   const reconnectNowRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -238,7 +247,7 @@ export default function RoomPage() {
       try {
         const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos, nextDocuments] = await Promise.all([
           api.getRoom(sessionId, storedIdentity.visitor_id),
-          api.getMessages(sessionId, storedIdentity.visitor_id),
+          api.getMessages(sessionId, storedIdentity.visitor_id, { limit: MESSAGE_PAGE_SIZE }),
           api.getMentions(sessionId, storedIdentity.visitor_id),
           api.getSummary(sessionId, storedIdentity.visitor_id),
           api.getIdeas(sessionId, storedIdentity.visitor_id),
@@ -250,6 +259,9 @@ export default function RoomPage() {
         if (canceled) return;
         setRoom(nextRoom);
         setMessages(nextMessages);
+        hasOlderRef.current = nextMessages.length >= MESSAGE_PAGE_SIZE;
+        setHasOlder(hasOlderRef.current);
+        viewingOldWindowRef.current = false;
         lastMessageIdRef.current = nextMessages.reduce((latest, message) => Math.max(latest, message.id), 0);
         setSummary(nextSummary.latest);
         setSummaryVersions(nextSummary.history);
@@ -334,7 +346,7 @@ export default function RoomPage() {
         setSocketStatus("connected");
         if (recovered) showToast("连接已恢复");
         const cursor = lastMessageIdRef.current;
-        void api.getMessages(sessionId, visitorId, cursor).then((missedMessages) => {
+        void api.getMessages(sessionId, visitorId, { after: cursor }).then((missedMessages) => {
           missedMessages.forEach((message) => {
             applyMessage(message);
             if (message.visitor_id !== visitorId && message.content.includes(`@${nickname}`)) {
@@ -483,6 +495,24 @@ export default function RoomPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [typingNames, nearBottom]);
 
+  // 上滑加载更早的消息后，把多出的高度补回 scrollTop，视觉位置不动。
+  // 必须用 useLayoutEffect：它在 DOM 提交后、绘制前同步执行，能读到新 scrollHeight；
+  // setTimeout 方案不可靠——回调可能在 React 提交之前跑，读到的还是旧高度。
+  // 防重入锁也在这里解：fetch 完成后、提交之前，平滑滚动动画还在一帧一帧地
+  // 触发 onScroll，锁解早了会拿到旧的 messages[0].id，同一页被重复拉两次。
+  useLayoutEffect(() => {
+    const pending = pendingScrollAdjustRef.current;
+    if (!pending || !listRef.current) return;
+    pendingScrollAdjustRef.current = null;
+    const list = listRef.current;
+    const prevBehavior = list.style.scrollBehavior;
+    list.style.scrollBehavior = "auto";
+    list.scrollTop = pending.prevTop + (list.scrollHeight - pending.prevHeight);
+    list.style.scrollBehavior = prevBehavior;
+    loadingOlderRef.current = false;
+    setLoadingOlder(false);
+  }, [messages]);
+
   useEffect(() => {
     if (!selectedImage) { setImagePreview(""); return; }
     const url = URL.createObjectURL(selectedImage);
@@ -506,7 +536,7 @@ export default function RoomPage() {
       saveIdentity(joined);
       setIdentity(joined);
       const [nextRoom, nextMessages, mentions, nextSummary, nextIdeas, nextUsage, nextVotes, nextTodos, nextDocuments] = await Promise.all([
-        api.getRoom(sessionId, joined.visitor_id), api.getMessages(sessionId, joined.visitor_id), api.getMentions(sessionId, joined.visitor_id),
+        api.getRoom(sessionId, joined.visitor_id), api.getMessages(sessionId, joined.visitor_id, { limit: MESSAGE_PAGE_SIZE }), api.getMentions(sessionId, joined.visitor_id),
         api.getSummary(sessionId, joined.visitor_id), api.getIdeas(sessionId, joined.visitor_id), api.getUsage(sessionId, joined.visitor_id).catch(() => emptyUsage),
         api.getVotes(sessionId, joined.visitor_id),
         api.getTodos(sessionId, joined.visitor_id),
@@ -514,6 +544,9 @@ export default function RoomPage() {
       ]);
       setRoom(nextRoom);
       setMessages(nextMessages);
+      hasOlderRef.current = nextMessages.length >= MESSAGE_PAGE_SIZE;
+      setHasOlder(hasOlderRef.current);
+      viewingOldWindowRef.current = false;
       lastMessageIdRef.current = nextMessages.reduce((latest, message) => Math.max(latest, message.id), 0);
       setSummary(nextSummary.latest);
       setSummaryVersions(nextSummary.history);
@@ -971,12 +1004,73 @@ export default function RoomPage() {
     } catch { setError("复制失败，请手动复制浏览器地址"); }
   }
 
-  function jumpToMessage(messageId: number) {
+  // 上滑加载更早的消息：拼到列表前面，滚动位置由 useLayoutEffect 补回。
+  async function loadOlder() {
+    if (!identity || loadingOlderRef.current || !hasOlderRef.current || messages.length === 0) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const list = listRef.current;
+    const prevHeight = list?.scrollHeight ?? 0;
+    const prevTop = list?.scrollTop ?? 0;
+    try {
+      const older = await api.getMessages(sessionId, identity.visitor_id, { before: messages[0].id, limit: MESSAGE_PAGE_SIZE });
+      if (older.length < MESSAGE_PAGE_SIZE) { hasOlderRef.current = false; setHasOlder(false); }
+      if (older.length > 0) {
+        pendingScrollAdjustRef.current = { prevHeight, prevTop };
+        // 按 id 去重：锁的释放点在提交后，但极端时序下仍可能重复拉到同一页。
+        setMessages((current) => {
+          const known = new Set(current.map((message) => message.id));
+          return [...older.filter((message) => !known.has(message.id)), ...current];
+        });
+        return;
+      }
+    } catch { /* 保持现状，下次滚到顶再试 */ }
+    // 只有没拼上新消息（拉到 0 条或失败）才在这里解锁；拼上了的由
+    // useLayoutEffect 在提交后解锁，避免平滑滚动动画期间重复触发。
+    loadingOlderRef.current = false;
+    setLoadingOlder(false);
+  }
+
+  // 跳转到旧消息后回到最新：重新拉最新一页，补上跳转期间错过的中间消息。
+  async function reloadLatest() {
+    if (!identity || reloadingLatestRef.current) return;
+    reloadingLatestRef.current = true;
+    viewingOldWindowRef.current = false;
+    try {
+      const latest = await api.getMessages(sessionId, identity.visitor_id, { limit: MESSAGE_PAGE_SIZE });
+      setMessages(latest);
+      hasOlderRef.current = latest.length >= MESSAGE_PAGE_SIZE;
+      setHasOlder(hasOlderRef.current);
+      setNearBottom(true);
+    } catch { /* 保持现状 */ }
+    finally { reloadingLatestRef.current = false; }
+  }
+
+  async function jumpToMessage(messageId: number) {
     const target = document.getElementById(`message-${messageId}`);
-    target?.scrollIntoView({ behavior: "smooth", block: "center" });
-    setQuoteFlash(messageId);
-    window.setTimeout(() => setQuoteFlash(null), 1500);
-    setNearBottom(false);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      setQuoteFlash(messageId);
+      window.setTimeout(() => setQuoteFlash(null), 1500);
+      setNearBottom(false);
+      return;
+    }
+    // 目标不在已加载的消息里：拉它前后各半页再跳。
+    if (!identity) return;
+    try {
+      const windowMessages = await api.getMessages(sessionId, identity.visitor_id, { around: messageId, limit: MESSAGE_PAGE_SIZE });
+      if (!windowMessages.some((message) => message.id === messageId)) { showToast("找不到这条消息。"); return; }
+      setMessages(windowMessages);
+      hasOlderRef.current = true;
+      setHasOlder(true);
+      viewingOldWindowRef.current = windowMessages[windowMessages.length - 1].id < lastMessageIdRef.current;
+      window.setTimeout(() => {
+        document.getElementById(`message-${messageId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+        setQuoteFlash(messageId);
+        window.setTimeout(() => setQuoteFlash(null), 1500);
+      }, 80);
+      setNearBottom(false);
+    } catch { showToast("加载消息失败，请稍后再试。"); }
   }
 
   function selectSearchResult(result: RoomSearchResult) {
@@ -1011,10 +1105,20 @@ export default function RoomPage() {
     // 菜单不随滚动关闭：新消息到来时的自动滚动也会触发 onScroll，
     // 之前就是它把打开的菜单关掉，导致撤回按钮在点击前从 DOM 脱离。
     // 菜单打开时有全屏遮罩，用户本来也滚不动列表，遮罩点击 / Esc / 选动作就够关了。
-    const remaining = listRef.current.scrollHeight - listRef.current.scrollTop - listRef.current.clientHeight;
+    const list = listRef.current;
+    // 只响应用户主动上滑：初次加载时列表从顶部平滑滚到底，途中的 scrollTop 也 < 200，
+    // 方向判断能排除这次程序滚动（向下），否则会误触，把整间房的消息全拉下来。
+    const scrollingUp = list.scrollTop < prevScrollTopRef.current;
+    prevScrollTopRef.current = list.scrollTop;
+    const remaining = list.scrollHeight - list.scrollTop - list.clientHeight;
     const atBottom = remaining < 120;
     setNearBottom(atBottom);
     if (atBottom) setNewMessages(false);
+    // 回到最新只响应用户主动下滑到底：跳转到旧消息时列表内容会缩短，浏览器把
+    // scrollTop 往上钳制到新的最大值，那次滚动方向是向上，不能触发重载，否则
+    // 跳转刚完成就被最新一页盖掉。
+    if (atBottom && viewingOldWindowRef.current && !scrollingUp) { void reloadLatest(); return; }
+    if (scrollingUp && !atBottom && list.scrollTop < 200) void loadOlder();
   }
 
   async function selectCommand(command: string) {
@@ -1261,7 +1365,7 @@ export default function RoomPage() {
         </div>}
 
         <div className="msg-list" ref={listRef} onScroll={onScroll}>
-          <div className="msg-start">讨论从这里开始</div>
+          {loadingOlder ? <div className="msg-start">正在加载更早的消息…</div> : hasOlder ? <div className="msg-start">上滑加载更早的消息</div> : <div className="msg-start">讨论从这里开始</div>}
           {filteredMessages.map((message, index) => {
             const own = message.visitor_id === identity.visitor_id;
             const isAgentMessage = message.sender_type === "agent" || message.sender_name === "RoomAI";
@@ -1305,7 +1409,7 @@ export default function RoomPage() {
           <div ref={bottomRef} />
         </div>
 
-        {!nearBottom && newMessages && <button className="new-msg-btn" onClick={() => setNearBottom(true)}>有新消息 <ArrowDown size={14} /></button>}
+        {!nearBottom && newMessages && <button className="new-msg-btn" onClick={() => { if (viewingOldWindowRef.current) void reloadLatest(); else setNearBottom(true); }}>有新消息 <ArrowDown size={14} /></button>}
         {error && <div className="alert"><span>{error}</span><button onClick={() => setError("")} aria-label="关闭"><X size={14} /></button></div>}
         {toast && <div className="toast"><Check size={13} /><span>{toast}</span></div>}
         {menu && <>

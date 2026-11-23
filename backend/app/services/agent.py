@@ -14,6 +14,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 from ..config import (
+    FALLBACK_MODEL_NAME,
     MODEL_API_KEY,
     MODEL_BASE_URL,
     MODEL_INPUT_PRICE_PER_MILLION,
@@ -64,6 +65,13 @@ async def complete_chat(
 ) -> dict | None:
     """Call the configured OpenAI-compatible endpoint, retry once, and record usage.
 
+    The retry uses the fallback model when one is configured (FALLBACK_MODEL_NAME):
+    first attempt the requested model, second attempt the fallback. When the
+    requested model already is the fallback, the second attempt goes to the
+    default model instead. Usage is recorded under the model that actually
+    answered. A failed call is never billed twice: only the successful attempt
+    records usage.
+
     Endpoint resolution: explicit base_url/api_key arguments win (used to test an
     unsaved config); otherwise a room's own saved config wins when session_id is
     given; otherwise the server environment defaults apply.
@@ -90,6 +98,17 @@ async def complete_chat(
     if not effective_api_key:
         return None
     selected_model = model or MODEL_NAME
+    # 备用模型：第一次调主模型，失败后第二次调备用。备用默认是免费的 GLM-4.7-Flash；
+    # 主模型本身就是它时（结构化分析），备用改走默认模型——这样带图片的分析
+    # （4.7-Flash 不支持看图，请求会被拒）能自动切回支持看图的房间模型。
+    fallback = (FALLBACK_MODEL_NAME or "").strip() or None
+    attempt_models = [selected_model]
+    if fallback and fallback != selected_model:
+        attempt_models.append(fallback)
+    elif MODEL_NAME != selected_model:
+        attempt_models.append(MODEL_NAME)
+    else:
+        attempt_models.append(selected_model)
     body = {"model": selected_model, "temperature": temperature, "messages": messages}
     if json_mode:
         body["response_format"] = {"type": "json_object"}
@@ -101,6 +120,8 @@ async def complete_chat(
         body["stream"] = True
     sent_delta = False
     for attempt in range(2):
+        attempt_model = attempt_models[attempt]
+        body["model"] = attempt_model
         try:
             async with httpx.AsyncClient(timeout=MODEL_TIMEOUT_SECONDS) as client:
                 headers = {"Authorization": f"Bearer {effective_api_key}"}
@@ -168,7 +189,7 @@ async def complete_chat(
             if (not isinstance(content, str) or not content.strip()) and not tool_calls:
                 raise ValueError("empty model response")
             usage = _usage_from_response(payload, messages)
-            prices = MODEL_PRICES.get(selected_model, {})
+            prices = MODEL_PRICES.get(attempt_model, {})
             input_price = prices.get("input", MODEL_INPUT_PRICE_PER_MILLION)
             output_price = prices.get("output", MODEL_OUTPUT_PRICE_PER_MILLION)
             cost = (usage["prompt_tokens"] * input_price + usage["completion_tokens"] * output_price) / 1_000_000
@@ -176,11 +197,11 @@ async def complete_chat(
                 with database() as connection:
                     connection.execute(
                         "INSERT INTO usage (session_id, model, prompt_tokens, completion_tokens, cost_estimate, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))",
-                        (session_id, selected_model, usage["prompt_tokens"], usage["completion_tokens"], cost),
+                        (session_id, attempt_model, usage["prompt_tokens"], usage["completion_tokens"], cost),
                     )
-            return {"content": content.strip(), "tool_calls": tool_calls, "usage": usage, "model": selected_model}
+            return {"content": content.strip(), "tool_calls": tool_calls, "usage": usage, "model": attempt_model}
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-            logger.warning("Model call failed (model=%s, attempt=%d): %s: %s", selected_model, attempt + 1, type(exc).__name__, exc)
+            logger.warning("Model call failed (model=%s, attempt=%d): %s: %s", attempt_model, attempt + 1, type(exc).__name__, exc)
             if attempt == 1 or sent_delta:
                 return None
     return None

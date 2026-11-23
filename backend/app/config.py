@@ -23,6 +23,11 @@ DOCUMENT_DIR = _path_from_env("DOCUMENT_DIR", "backend/documents")
 MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "https://aiping.cn/api/v1").rstrip("/")
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "GLM-5.3-Flash")
+# 结构化分析（总结/画图）走的快模型：GLM-4.7-Flash 在 aiping.cn 上免费且非推理模型，
+# 不烧思考 token，一次分析从 170 秒级降到几十秒级。图片理解仍走房间模型（4.7-Flash 不支持看图）。
+ANALYSIS_MODEL_NAME = os.getenv("ANALYSIS_MODEL_NAME", "GLM-4.7-Flash")
+# 主模型调用失败时，complete_chat 第二次尝试用的备用模型。默认同分析模型（免费）。
+FALLBACK_MODEL_NAME = os.getenv("FALLBACK_MODEL_NAME", "GLM-4.7-Flash")
 AVAILABLE_MODELS = [
     item.strip()
     for item in os.getenv("AVAILABLE_MODELS", MODEL_NAME).split(",")
@@ -39,6 +44,12 @@ except json.JSONDecodeError:
     _raw_model_prices = {}
 if not isinstance(_raw_model_prices, dict):
     _raw_model_prices = {}
+# aiping.cn 实测价（2026-11-23，元/百万 token）：GLM-4.7-Flash 免费；
+# GLM-5.3-Flash 输出 1.40 是官方 2.80 的一半。环境变量 MODEL_PRICES 可覆盖这里的默认值。
+_DEFAULT_MODEL_PRICES = {
+    "GLM-5.3-Flash": {"input": 0.8, "output": 1.4},
+    "GLM-4.7-Flash": {"input": 0.0, "output": 0.0},
+}
 MODEL_PRICES = {
     str(model): {
         "input": max(0.0, float(prices.get("input", 0))),
@@ -47,6 +58,7 @@ MODEL_PRICES = {
     for model, prices in _raw_model_prices.items()
     if isinstance(prices, dict)
 }
+MODEL_PRICES = {**_DEFAULT_MODEL_PRICES, **MODEL_PRICES}
 DEFAULT_EVALUATION_DIMENSIONS = [
     {"key": "feasibility", "label": "技术可行性", "guidance": "现有技术与团队能力能否实现"},
     {"key": "people_cost", "label": "人力成本", "guidance": "需要多少人力与资源投入"},
