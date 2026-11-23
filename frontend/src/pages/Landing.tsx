@@ -3,6 +3,7 @@ import { ArrowRight, ArrowUpRight, Check, Cpu, FileText, History, ImagePlus, Lig
 import { useNavigate } from "react-router-dom";
 import { api, RoomTemplate, saveIdentity } from "../lib/api";
 import { memberColor } from "../lib/memberColor";
+import BrandMark from "../components/BrandMark";
 
 type Mode = "create" | "join" | null;
 
@@ -45,7 +46,7 @@ export default function LandingPage() {
     <main className="landing">
       <nav className="landing-nav">
         <a className="brand" href="/" aria-label="RoomAI 首页">
-          <span className="brand-mark"><span /><span /><span /></span>
+          <BrandMark />
           <span>roomai</span>
         </a>
         <a className="nav-link" href="#how-it-works">怎么开始</a>
@@ -71,7 +72,7 @@ export default function LandingPage() {
           <div className="demo-body">
             <div className="demo-msg"><span className="avatar avatar-sm" style={linColor}>林</span><div><b style={{ color: linColor.color }}>林</b><p>可以先从毕业季的闲置开始，需求最集中。</p></div></div>
             <div className="demo-msg"><span className="avatar avatar-sm" style={zhouColor}>周</span><div><b style={{ color: zhouColor.color }}>周</b><p>同意，毕业季大家都有东西要出，验证成本也低。</p></div></div>
-            <div className="demo-msg demo-msg-ai"><span className="avatar avatar-sm avatar-ai"><span className="brand-mark brand-mark-in-avatar"><span /><span /><span /></span></span><div><b>RoomAI</b><p>这个切入点很清楚：需求集中、验证成本低。我给它打了 4.6 分。大家觉得先做校内小程序还是社群？</p></div></div>
+            <div className="demo-msg demo-msg-ai"><span className="avatar avatar-sm avatar-ai"><BrandMark /></span><div><b>RoomAI</b><p>这个切入点很清楚：需求集中、验证成本低。我给它打了 4.6 分。大家觉得先做校内小程序还是社群？</p></div></div>
             <div className="demo-idea"><b>一个新想法</b><span>宿舍楼下设置交换架</span><span>4.6 / 5</span></div>
             <div className="demo-memo"><Check size={14} /><span><b>讨论结束时</b> 已形成共识：先做小程序 MVP · 下一步：林出一份问卷</span></div>
           </div>
