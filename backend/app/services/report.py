@@ -8,6 +8,10 @@ from ..database import database
 from .agent import complete_chat
 from .diagram import sanitize_mermaid_code
 
+# 纪要里的状态一律写中文，不要把数据库里的英文枚举值直接打出来。
+IDEA_STATUS_LABELS = {"considering": "讨论中", "pending": "待定", "adopted": "已采纳", "accepted": "已采纳", "rejected": "已否决", "declined": "已否决"}
+TODO_STATUS_LABELS = {"open": "进行中", "done": "已完成", "dropped": "已放弃"}
+
 
 def _cell(value) -> str:
     return str(value or "").replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
@@ -219,7 +223,7 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
         for idea in ranked:
             score = f"{idea['average_score']:.1f}/5" if idea["average_score"] is not None else "待评估"
             source = f"[消息 #{idea['source_message_id']}](/room/{session_id}#message-{idea['source_message_id']})" if idea["source_message_id"] else "—"
-            minutes.append(f"| {_cell(idea['title'])} | {_cell(idea['proposer_name']) or '未记录'} | {score} | {idea['support_count']} / {idea['oppose_count']} | {_cell(idea['status'])} | {source} |")
+            minutes.append(f"| {_cell(idea['title'])} | {_cell(idea['proposer_name']) or '未记录'} | {score} | {idea['support_count']} / {idea['oppose_count']} | {_cell(IDEA_STATUS_LABELS.get(idea['status'], idea['status']))} | {source} |")
     else:
         minutes.append("| 暂无已记录想法 | — | — | — | — | — |")
     chosen = next((item for item in ideas if item["id"] == recommended_id), None)
@@ -241,7 +245,7 @@ async def generate_room_report(session_id: str, model: str, missing_dimensions: 
     if todos:
         for item in todos:
             source = f"[消息 #{item['source_message_id']}](/room/{session_id}#message-{item['source_message_id']})" if item["source_message_id"] else "—"
-            minutes.append(f"| {_cell(item['title'])} | {_cell(item['assignee']) or '待分配'} | {_cell(item['due_at']) or '未设定'} | {_cell(item['status'])} | {source} |")
+            minutes.append(f"| {_cell(item['title'])} | {_cell(item['assignee']) or '待分配'} | {_cell(item['due_at']) or '未设定'} | {_cell(TODO_STATUS_LABELS.get(item['status'], item['status']))} | {source} |")
     else:
         minutes.append("| 暂无明确待办 | — | — | — | — |")
     minutes.extend(["", "## 6. 分歧与投票结果", ""])

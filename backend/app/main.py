@@ -21,6 +21,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import (
+    ANALYSIS_MAX_ATTEMPTS,
+    ANALYSIS_RETRY_DELAY_SECONDS,
+    ANALYSIS_RETRY_FAST_SECONDS,
     AVAILABLE_MODELS,
     DOCUMENT_DIR,
     FALLBACK_TRIGGER_MESSAGES,
@@ -373,20 +376,36 @@ async def publish_room_analysis(
             room = ensure_room(session_id)
             if room["closed_at"]:
                 return None
-            try:
-                result = await run_room_agent(
-                    session_id=session_id,
-                    topic=room["topic"],
-                    history=[],
-                    prompt="增量分析当前讨论，更新总结、想法评估和下一步。",
-                    model=room["model"],
-                    phase=room["phase"],
-                    mode="analysis",
-                    auto_guidance=auto_guidance,
-                )
-            except Exception:
-                logger.exception("Room analysis failed for room %s", session_id)
-                result = None
+            # 分析失败自动重试：中转抖动（503、连接失败）通常几十秒后就恢复，
+            # 没必要留一条失败消息让用户手动重发命令。只对"快速失败"重试——
+            # 一次调用就拖到超时说明模型或中转本身在挂起，重试只是再等几分钟。
+            # 思考提示由外层的 finally 统一关闭，重试期间一直亮着。
+            result = None
+            for attempt in range(ANALYSIS_MAX_ATTEMPTS):
+                started = time.monotonic()
+                try:
+                    result = await run_room_agent(
+                        session_id=session_id,
+                        topic=room["topic"],
+                        history=[],
+                        prompt="增量分析当前讨论，更新总结、想法评估和下一步。",
+                        model=room["model"],
+                        phase=room["phase"],
+                        mode="analysis",
+                        auto_guidance=auto_guidance,
+                    )
+                except Exception:
+                    logger.exception("Room analysis failed for room %s", session_id)
+                    result = None
+                if isinstance(result, dict) and result:
+                    break
+                elapsed = time.monotonic() - started
+                if attempt < ANALYSIS_MAX_ATTEMPTS - 1 and elapsed < ANALYSIS_RETRY_FAST_SECONDS:
+                    logger.warning(
+                        "Room analysis failed fast (%.1fs), retrying in %ds (attempt %d/%d)",
+                        elapsed, ANALYSIS_RETRY_DELAY_SECONDS, attempt + 2, ANALYSIS_MAX_ATTEMPTS,
+                    )
+                    await asyncio.sleep(ANALYSIS_RETRY_DELAY_SECONDS)
             if not isinstance(result, dict) or not result:
                 message = create_message_record(
                     session_id, None, "RoomAI", "agent", "AI 暂时没反应，请稍后再试。讨论消息已经保留。", now_iso()

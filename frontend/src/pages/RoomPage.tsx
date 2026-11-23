@@ -62,6 +62,17 @@ function formatFileSize(value: number) {
   return value >= 1024 * 1024 ? `${(value / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.ceil(value / 1024))} KB`;
 }
 
+// 思考计时：独立组件自己每秒刷新，只重渲染这一小块，不带动整个房间页面。
+function ThinkingTimer({ since }: { since: number }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  return <>{`${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`}</>;
+}
+
 export default function RoomPage() {
   const { sessionId = "" } = useParams();
   const navigate = useNavigate();
@@ -82,6 +93,7 @@ export default function RoomPage() {
   const [roomError, setRoomError] = useState("");
   const [onlineIds, setOnlineIds] = useState<string[]>([]);
   const [typingNames, setTypingNames] = useState<string[]>([]);
+  const [thinkingSince, setThinkingSince] = useState<number | null>(null);
   const [streamingMessages, setStreamingMessages] = useState<{ stream_id: string; content: string; created_at: string }[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [newMessages, setNewMessages] = useState(false);
@@ -364,6 +376,7 @@ export default function RoomPage() {
           if (data.type === "presence") setOnlineIds((data.members as Member[]).map((member) => member.visitor_id));
           if (data.type === "typing" && data.visitor_id !== visitorId) {
             setTypingNames((current) => data.active ? [...new Set([...current, data.nickname])] : current.filter((name) => name !== data.nickname));
+            if (data.visitor_id === "roomai") setThinkingSince(data.active ? Date.now() : null);
             if (data.active && data.visitor_id !== "roomai") window.setTimeout(() => setTypingNames((current) => current.filter((name) => name !== data.nickname)), 3200);
           }
           if (data.type === "phase_changed") setRoom((current) => current ? { ...current, phase: data.phase } : current);
@@ -462,6 +475,12 @@ export default function RoomPage() {
     const frame = window.requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }));
     return () => window.cancelAnimationFrame(frame);
   }, [nearBottom, streamingMessages]);
+
+  // 思考/输入提示出现时也滚到底，否则列表满时它会被输入框挡住一半。
+  useEffect(() => {
+    if (!nearBottom || typingNames.length === 0) return;
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [typingNames, nearBottom]);
 
   useEffect(() => {
     if (!selectedImage) { setImagePreview(""); return; }
@@ -988,7 +1007,9 @@ export default function RoomPage() {
 
   function onScroll() {
     if (!listRef.current) return;
-    if (menu) closeMenu();
+    // 菜单不随滚动关闭：新消息到来时的自动滚动也会触发 onScroll，
+    // 之前就是它把打开的菜单关掉，导致撤回按钮在点击前从 DOM 脱离。
+    // 菜单打开时有全屏遮罩，用户本来也滚不动列表，遮罩点击 / Esc / 选动作就够关了。
     const remaining = listRef.current.scrollHeight - listRef.current.scrollTop - listRef.current.clientHeight;
     const atBottom = remaining < 120;
     setNearBottom(atBottom);
@@ -1279,7 +1300,7 @@ export default function RoomPage() {
               <div className="msg-body"><MarkdownContent content={item.content} /><i className="stream-cursor" aria-hidden="true" /></div>
             </div>
           </article>)}
-          {typingNames.length > 0 && <div className="typing"><span className="typing-dots"><i /><i /><i /></span>{typingText}</div>}
+          {typingNames.length > 0 && <div className="typing"><span className="typing-dots"><i /><i /><i /></span>{typingText}{thinkingSince !== null && typingNames.includes("RoomAI") && <span className="typing-timer">· <ThinkingTimer since={thinkingSince} /></span>}</div>}
           <div ref={bottomRef} />
         </div>
 
