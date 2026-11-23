@@ -1,6 +1,6 @@
 import { Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowDown, ArrowRight, ArrowUp, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Copy, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Settings2, Sparkles, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
+import { ArrowDown, ArrowRight, ArrowUp, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Copy, Ellipsis, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Settings2, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
 import { api, FinishReview, Identity, Idea, IdeaStatus, LlmConfig, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import { memberColor, memberColorAt } from "../lib/memberColor";
 import MarkdownContent from "../components/MarkdownContent";
@@ -104,6 +104,10 @@ export default function RoomPage() {
   const [todoBusyIds, setTodoBusyIds] = useState<number[]>([]);
   const [voteBusyIds, setVoteBusyIds] = useState<number[]>([]);
   const [modelSaving, setModelSaving] = useState(false);
+  const [todosOpen, setTodosOpen] = useState(false);
+  const [ideasOpen, setIdeasOpen] = useState(false);
+  const [documentsOpen, setDocumentsOpen] = useState(false);
+  const [topbarMenuOpen, setTopbarMenuOpen] = useState(false);
   const [llmBaseUrl, setLlmBaseUrl] = useState("");
   const [llmApiKey, setLlmApiKey] = useState("");
   const [llmModel, setLlmModel] = useState("");
@@ -1128,14 +1132,14 @@ export default function RoomPage() {
         {summary.content.todos.length > 0 && <div className="summary-sub"><b>下一步</b><span>{summary.content.todos[0].title}{summary.content.todos[0].assignee ? ` · ${summary.content.todos[0].assignee}` : ""}</span></div>}
       </> : <p className="side-empty">讨论开始后，RoomAI 会在这里整理共识、分歧和待办。</p>}
 
-      <div className="side-label-row todo-heading"><p className="side-label">待办</p><span className="count">{todos.filter((todo) => todo.status === "open").length} 未完成</span></div>
-      {todos.length ? <div className="todo-list">{todos.slice(0, 6).map((todo) => <button className={`todo-item ${todo.status !== "open" ? "todo-item-closed" : ""}`} key={todo.id} disabled={Boolean(room.closed_at)} onClick={() => setEditingTodo(todo)}>
+      <div className="side-label-row todo-heading side-collapse-row"><button className="side-collapse-toggle" onClick={() => setTodosOpen((value) => !value)} aria-expanded={todosOpen}><ChevronDown size={14} className={todosOpen ? "open" : ""} /><span className="side-label">待办</span></button><span className="count">{todos.filter((todo) => todo.status === "open").length} 未完成</span></div>
+      {todosOpen && (todos.length ? <div className="todo-list">{todos.slice(0, 6).map((todo) => <button className={`todo-item ${todo.status !== "open" ? "todo-item-closed" : ""}`} key={todo.id} disabled={Boolean(room.closed_at)} onClick={() => setEditingTodo(todo)}>
         <span className="todo-state-mark">{todo.status === "done" ? "✓" : todo.status === "dropped" ? "–" : "○"}</span>
         <span className="todo-item-copy"><b>{todo.title}</b><small>{todo.assignee || "待分配"} · {todo.status === "open" ? "未完成" : todo.status === "done" ? "已完成" : "已取消"}{todo.due_at ? ` · ${todo.due_at} 截止` : ""}</small></span>
-      </button>)}</div> : <p className="side-empty">讨论中明确的下一步会整理到这里。</p>}
+      </button>)}</div> : <p className="side-empty">讨论中明确的下一步会整理到这里。</p>)}
 
-      <div className="side-label-row"><p className="side-label">想法池</p><span className="count">{ideas.length}</span></div>
-      {ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <div className="idea-item" key={idea.id}>
+      <div className="side-label-row side-collapse-row"><button className="side-collapse-toggle" onClick={() => setIdeasOpen((value) => !value)} aria-expanded={ideasOpen}><ChevronDown size={14} className={ideasOpen ? "open" : ""} /><span className="side-label">想法池</span></button><span className="count">{ideas.length}</span></div>
+      {ideasOpen && (ideas.length ? <div className="idea-list">{ideas.slice(0, 5).map((idea) => <div className="idea-item" key={idea.id}>
         <button type="button" className="idea-item-main" onClick={() => idea.source_message_id && jumpToMessage(idea.source_message_id)}>
           <span className="idea-item-title">{idea.title}</span>
           <span className="idea-item-meta">{idea.average_score !== null ? `${idea.average_score.toFixed(1)} / 5` : "待评估"}{idea.proposer_name ? ` · ${idea.proposer_name}` : ""}{idea.supplementers.length ? ` · 补充：${idea.supplementers.join("、")}` : ""}</span>
@@ -1148,17 +1152,17 @@ export default function RoomPage() {
             <option value="considering">讨论中</option><option value="pending">待定</option><option value="adopted">已采纳</option><option value="rejected">已否决</option>
           </select>}
         </div>
-      </div>)}</div> : <p className="side-empty">值得做的想法，会在讨论中浮现。</p>}
+      </div>)}</div> : <p className="side-empty">值得做的想法，会在讨论中浮现。</p>)}
 
-      <div className="side-label-row document-heading">
-        <p className="side-label">讨论资料</p>
+      <div className="side-label-row document-heading side-collapse-row">
+        <button className="side-collapse-toggle" onClick={() => setDocumentsOpen((value) => !value)} aria-expanded={documentsOpen}><ChevronDown size={14} className={documentsOpen ? "open" : ""} /><span className="side-label">讨论资料</span></button>
         <span className="document-heading-actions"><span className="count">{documents.length}/20</span><label className={`icon-btn attach document-add ${room.closed_at || documents.length >= 20 || documentUploading ? "disabled" : ""}`} title={room.closed_at ? "讨论已结束" : documents.length >= 20 ? "每个房间最多 20 份资料" : "添加讨论资料"}><FilePlus2 size={14} /><input type="file" disabled={Boolean(room.closed_at) || documents.length >= 20 || documentUploading} accept=".pdf,.docx,.pptx,.txt,.md,application/pdf,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadRoomDocument(file); event.currentTarget.value = ""; }} /></label></span>
       </div>
-      {documents.length ? <div className="document-list">{documents.map((item) => <div className="document-item" key={item.id}>
+      {documentsOpen && (documents.length ? <div className="document-list">{documents.map((item) => <div className="document-item" key={item.id}>
         <FileText size={14} className="document-icon" />
         <span className="document-copy" title={item.filename}><b>{item.filename}</b><small>{formatFileSize(item.size)} · {item.chunk_count} 段 · {item.uploaded_by}</small></span>
         {(identity.owner_token || item.uploaded_by === identity.nickname) && !room.closed_at && <button className="icon-btn document-delete" onClick={() => void removeRoomDocument(item)} aria-label={`删除资料 ${item.filename}`} title="删除资料"><Trash2 size={13} /></button>}
-      </div>)}</div> : <p className="side-empty">添加 PDF、Word、PPT、TXT 或 Markdown，RoomAI 会按问题检索相关内容。</p>}
+      </div>)}</div> : <p className="side-empty">添加 PDF、Word、PPT、TXT 或 Markdown，RoomAI 会按问题检索相关内容。</p>)}
 
       <p className="side-label">讨论维度</p>
       <div className="dim-list">{dimensionLabels.map(([label, key]) => {
@@ -1193,7 +1197,19 @@ export default function RoomPage() {
         {unreadMentionIds.length > 0 && <button className="mention-badge" onClick={() => void openUnreadMention()} title="跳转到未读 @ 提醒"><AtSign size={13} /><span>{unreadMentionIds.length}</span></button>}
         <button className={`icon-btn ${searchOpen ? "active" : ""}`} onClick={() => { setSearchOpen((value) => !value); setSearch(""); }} aria-label="搜索消息"><Search size={17} /></button>
         <button className="icon-btn" onClick={() => setSettingsOpen(true)} aria-label="房间设置" title="房间设置"><Settings2 size={17} /></button>
-        <button className="icon-btn" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={17} /> : <Clipboard size={17} />}</button>
+        <button className="icon-btn topbar-copy" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <ClipboardCheck size={17} /> : <Clipboard size={17} />}</button>
+        <div className="topbar-menu-wrap">
+          <button className={`icon-btn topbar-more ${unreadMentionIds.length > 0 ? "has-unread" : ""}`} onClick={() => setTopbarMenuOpen((value) => !value)} aria-label="更多" aria-expanded={topbarMenuOpen}><Ellipsis size={18} /></button>
+          {topbarMenuOpen && <>
+            <div className="topbar-menu-scrim" onClick={() => setTopbarMenuOpen(false)} />
+            <div className="topbar-menu">
+              <div className="topbar-menu-head"><span className="online-stack">{onlineMembers.slice(0, 3).map((member) => <i key={member.visitor_id} style={paletteFor(member.visitor_id, member.nickname)}>{member.nickname.slice(0, 1)}</i>)}</span><span>{onlineMembers.length} 人在线</span></div>
+              {onlineMembers.length > 0 && <p className="topbar-menu-names">{onlineMembers.map((member) => member.nickname).join("、")}</p>}
+              {unreadMentionIds.length > 0 && <button className="topbar-menu-item" onClick={() => { setTopbarMenuOpen(false); void openUnreadMention(); }}><AtSign size={13} />{unreadMentionIds.length} 条未读 @提醒</button>}
+              <button className="topbar-menu-item" onClick={() => { setTopbarMenuOpen(false); void copyInvite(); }}>{linkCopied ? <ClipboardCheck size={13} /> : <Clipboard size={13} />}{linkCopied ? "已复制邀请链接" : "复制邀请链接"}</button>
+            </div>
+          </>}
+        </div>
       </header>
 
       {searchOpen && <>
@@ -1230,7 +1246,7 @@ export default function RoomPage() {
             return <Fragment key={message.id}>
             {showDateDivider && <div className="date-divider"><span>{formatDayDivider(message.created_at)}</span></div>}
             <article id={`message-${message.id}`} className={`msg ${own ? "msg-own" : ""} ${isAgentMessage ? "msg-agent" : ""} ${mentioned ? "msg-mention" : ""} ${quoteFlash === message.id ? "msg-flash" : ""} ${menu?.message.id === message.id ? "msg-open" : ""}`}>
-              <div className={`avatar msg-avatar ${isAgentMessage ? "avatar-ai" : ""}`} style={palette || undefined}>{isAgentMessage ? <Sparkles size={13} /> : message.sender_name.slice(0, 1)}</div>
+              <div className={`avatar msg-avatar ${isAgentMessage ? "avatar-ai" : ""} ${showAuthor ? "" : "avatar-hidden"}`} style={palette || undefined}>{showAuthor ? (isAgentMessage ? <span className="brand-mark brand-mark-in-avatar"><span /><span /><span /></span> : message.sender_name.slice(0, 1)) : null}</div>
               <div className="msg-main">
                 {showAuthor && <div className="msg-meta"><b className={isAgentMessage ? "agent-name" : ""} style={palette ? { color: palette.color } : undefined}>{message.sender_name}</b>{isAgentMessage && <i className="tag-ai">AI</i>}<time>{formatTime(message.created_at)}</time></div>}
                 <div className={`msg-body ${pressingId === message.id ? "msg-pressing" : ""}`} onPointerDown={(event) => startPress(message, event)} onPointerUp={cancelPress} onPointerLeave={cancelPress} onPointerMove={handlePressMove} onContextMenu={(event) => { event.preventDefault(); if (!message.is_recalled) openMenu(message, event.clientX, event.clientY); }}>
@@ -1250,7 +1266,7 @@ export default function RoomPage() {
             </Fragment>;
           })}
           {streamingMessages.filter((item) => item.content).map((item) => <article className="msg msg-agent-streaming" key={item.stream_id}>
-            <div className="avatar msg-avatar avatar-ai"><Sparkles size={13} /></div>
+            <div className="avatar msg-avatar avatar-ai"><span className="brand-mark brand-mark-in-avatar"><span /><span /><span /></span></div>
             <div className="msg-main"><div className="msg-meta"><b className="agent-name">RoomAI</b><i className="tag-ai">AI</i><time>{formatTime(item.created_at)}</time></div>
               <div className="msg-body"><MarkdownContent content={item.content} /><i className="stream-cursor" aria-hidden="true" /></div>
             </div>
@@ -1291,7 +1307,7 @@ export default function RoomPage() {
             </div>
             <div className="composer-input">
               {showCommands && <div className="suggest suggest-cmd">{commands.filter((command) => command.startsWith(composerValue.slice(commandEnd))).map((command) => <button type="button" onClick={() => void selectCommand(command)} key={command}><span>{command}</span><small>RoomAI 快捷指令</small></button>)}</div>}
-              {mentionMatch && mentionOptions.length > 0 && <div className="suggest suggest-mention"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-sm avatar-ai"><Sparkles size={12} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className="avatar avatar-sm" style={paletteFor(member.visitor_id, member.nickname)}>{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
+              {mentionMatch && mentionOptions.length > 0 && <div className="suggest suggest-mention"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-sm avatar-ai"><span className="brand-mark brand-mark-in-avatar"><span /><span /><span /></span></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className="avatar avatar-sm" style={paletteFor(member.visitor_id, member.nickname)}>{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
               <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} disabled={Boolean(room.closed_at) || voiceListening} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder={room.closed_at ? "讨论已结束" : voiceListening ? "正在聆听…点击麦克风结束后可编辑" : anonymousSubmission ? "写下匿名想法；所有成员都能看到内容，但看不到你的身份" : "说说你的想法…（输入 / 查看指令，@ 提及伙伴）"} />
             </div>
             <button type="button" className={`icon-btn voice-btn ${voiceListening ? "voice-listening" : ""}`} title={!voiceSupported ? "当前浏览器不支持语音识别" : voiceListening ? "结束语音输入" : "中文语音输入；部分浏览器可能会联网处理音频"} aria-label={voiceListening ? "结束语音输入" : "开始中文语音输入"} aria-pressed={voiceListening} disabled={Boolean(room.closed_at) || !voiceSupported} onClick={toggleVoiceInput}><Mic size={16} /></button>
