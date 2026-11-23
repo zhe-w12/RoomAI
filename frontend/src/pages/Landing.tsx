@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { ArrowRight, ArrowUpRight, Plus, X } from "lucide-react";
+import { ArrowRight, ArrowUpRight, Check, Cpu, FileText, History, ImagePlus, Lightbulb, Plus, Vote, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { api, RoomTemplate, saveIdentity } from "../lib/api";
 import { memberColor } from "../lib/memberColor";
@@ -49,6 +49,7 @@ export default function LandingPage() {
           <span>roomai</span>
         </a>
         <a className="nav-link" href="#how-it-works">怎么开始</a>
+        <a className="nav-link" href="https://github.com/zhe-w12/RoomAI" target="_blank" rel="noreferrer">GitHub <ArrowUpRight size={13} /></a>
       </nav>
 
       <section className="hero">
@@ -72,8 +73,18 @@ export default function LandingPage() {
             <div className="demo-msg"><span className="avatar avatar-sm" style={zhouColor}>周</span><div><b style={{ color: zhouColor.color }}>周</b><p>同意，毕业季大家都有东西要出，验证成本也低。</p></div></div>
             <div className="demo-msg demo-msg-ai"><span className="avatar avatar-sm avatar-ai"><span className="brand-mark brand-mark-in-avatar"><span /><span /><span /></span></span><div><b>RoomAI</b><p>这个切入点很清楚：需求集中、验证成本低。我给它打了 4.6 分。大家觉得先做校内小程序还是社群？</p></div></div>
             <div className="demo-idea"><b>一个新想法</b><span>宿舍楼下设置交换架</span><span>4.6 / 5</span></div>
+            <div className="demo-memo"><Check size={14} /><span><b>讨论结束时</b> 已形成共识：先做小程序 MVP · 下一步：林出一份问卷</span></div>
           </div>
         </div>
+      </section>
+
+      <section className="features" aria-label="RoomAI 能做什么">
+        <div><span className="feature-icon"><History size={18} /></span><h3>自动总结</h3><p>聊完 1 分钟没人说话，自动整理共识、分歧和待办。</p></div>
+        <div><span className="feature-icon"><Lightbulb size={18} /></span><h3>想法评分</h3><p>每个想法按六个维度打分，好的想法不会被淹没。</p></div>
+        <div><span className="feature-icon"><Vote size={18} /></span><h3>投票表决</h3><p>有分歧就发起投票，票数实时同步，结果记进纪要。</p></div>
+        <div><span className="feature-icon"><FileText size={18} /></span><h3>立项纪要</h3><p>讨论结束生成纪要、立项书草稿和复盘，可导出 Word / PDF。</p></div>
+        <div><span className="feature-icon"><ImagePlus size={18} /></span><h3>图片理解</h3><p>草图、原型、竞品截图发进来，AI 能看懂并参与讨论。</p></div>
+        <div><span className="feature-icon"><Cpu size={18} /></span><h3>自定义模型</h3><p>每个房间都能配自己的大模型地址、密钥和模型名。</p></div>
       </section>
 
       <section id="how-it-works" className="steps">
@@ -82,7 +93,7 @@ export default function LandingPage() {
         <div><span className="step-num">03</span><h3>带着共识继续</h3><p>沉淀值得做的方向、需要回答的问题和下一步。</p></div>
       </section>
 
-      <footer className="landing-footer"><span>RoomAI</span><span>让每一次讨论，都更接近行动。</span></footer>
+      <footer className="landing-footer"><span>RoomAI</span><span>让每一次讨论，都更接近行动。</span><a href="https://github.com/zhe-w12/RoomAI" target="_blank" rel="noreferrer">GitHub · MIT 开源</a></footer>
 
       {mode && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setMode(null); }}>
         <form className="modal" onSubmit={submit}>
