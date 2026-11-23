@@ -361,47 +361,60 @@ async def publish_room_analysis(
     *,
     auto_vote: bool = True,
     auto_guidance: bool = True,
+    show_thinking: bool = False,
 ) -> dict | None:
     async with _analysis_locks[session_id]:
-        room = ensure_room(session_id)
-        if room["closed_at"]:
-            return None
+        if show_thinking:
+            await manager.broadcast(
+                session_id,
+                {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": True},
+            )
         try:
-            result = await run_room_agent(
-                session_id=session_id,
-                topic=room["topic"],
-                history=[],
-                prompt="增量分析当前讨论，更新总结、想法评估和下一步。",
-                model=room["model"],
-                phase=room["phase"],
-                mode="analysis",
-                auto_guidance=auto_guidance,
-            )
-        except Exception:
-            logger.exception("Room analysis failed for room %s", session_id)
-            result = None
-        if not isinstance(result, dict) or not result:
-            message = create_message_record(
-                session_id, None, "RoomAI", "agent", "AI 暂时没反应，请稍后再试。讨论消息已经保留。", now_iso()
-            )
+            room = ensure_room(session_id)
+            if room["closed_at"]:
+                return None
+            try:
+                result = await run_room_agent(
+                    session_id=session_id,
+                    topic=room["topic"],
+                    history=[],
+                    prompt="增量分析当前讨论，更新总结、想法评估和下一步。",
+                    model=room["model"],
+                    phase=room["phase"],
+                    mode="analysis",
+                    auto_guidance=auto_guidance,
+                )
+            except Exception:
+                logger.exception("Room analysis failed for room %s", session_id)
+                result = None
+            if not isinstance(result, dict) or not result:
+                message = create_message_record(
+                    session_id, None, "RoomAI", "agent", "AI 暂时没反应，请稍后再试。讨论消息已经保留。", now_iso()
+                )
+                await manager.broadcast(session_id, {"type": "message", "message": message})
+                return None
+            message = create_message_record(session_id, None, "RoomAI", "agent", result["message"], now_iso())
+            message["todo_ids"] = attach_todos_to_message(session_id, message["id"], result.get("todo_ids", []))
             await manager.broadcast(session_id, {"type": "message", "message": message})
-            return None
-        message = create_message_record(session_id, None, "RoomAI", "agent", result["message"], now_iso())
-        message["todo_ids"] = attach_todos_to_message(session_id, message["id"], result.get("todo_ids", []))
-        await manager.broadcast(session_id, {"type": "message", "message": message})
-        await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
-        ideas = get_ideas_for_event(session_id)
-        await manager.broadcast(session_id, {"type": "idea_update", "ideas": ideas})
-        await manager.broadcast(session_id, {"type": "todo_update", "todos": get_room_todos(session_id)})
-        disagreements = result["summary"].get("disagreements", [])
-        if auto_vote and disagreements:
-            detail = "讨论分析识别到以下分歧，请围绕这些真实观点拟定中立投票：\n" + "\n".join(
-                f"- {item}" for item in disagreements[:4]
-            )
-            asyncio.create_task(create_ai_vote(session_id, detail))
-        if room["phase"] == "converge" and room["red_team_enabled"] and result["ideas"]:
-            asyncio.create_task(publish_red_team(session_id, automatic=True))
-        return result
+            await manager.broadcast(session_id, {"type": "summary_update", "summary": result["summary"]})
+            ideas = get_ideas_for_event(session_id)
+            await manager.broadcast(session_id, {"type": "idea_update", "ideas": ideas})
+            await manager.broadcast(session_id, {"type": "todo_update", "todos": get_room_todos(session_id)})
+            disagreements = result["summary"].get("disagreements", [])
+            if auto_vote and disagreements:
+                detail = "讨论分析识别到以下分歧，请围绕这些真实观点拟定中立投票：\n" + "\n".join(
+                    f"- {item}" for item in disagreements[:4]
+                )
+                asyncio.create_task(create_ai_vote(session_id, detail))
+            if room["phase"] == "converge" and room["red_team_enabled"] and result["ideas"]:
+                asyncio.create_task(publish_red_team(session_id, automatic=True))
+            return result
+        finally:
+            if show_thinking:
+                await manager.broadcast(
+                    session_id,
+                    {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": False},
+                )
 
 
 async def publish_red_team(session_id: str, detail: str = "", *, automatic: bool = False) -> None:
@@ -426,6 +439,11 @@ async def publish_red_team(session_id: str, detail: str = "", *, automatic: bool
             reserved = cursor.rowcount == 1
         if not reserved:
             return
+    if not automatic:
+        await manager.broadcast(
+            session_id,
+            {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": True},
+        )
     try:
         room = ensure_room(session_id)
         if room["closed_at"]:
@@ -486,6 +504,11 @@ async def publish_red_team(session_id: str, detail: str = "", *, automatic: bool
     except Exception:
         return
     finally:
+        if not automatic:
+            await manager.broadcast(
+                session_id,
+                {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": False},
+            )
         if stream_started:
             await manager.broadcast(
                 session_id,
@@ -750,7 +773,12 @@ async def expire_vote_after(session_id: str, vote_id: int, delay_seconds: int) -
         _vote_expiry_tasks.pop(vote_id, None)
 
 
-async def create_ai_vote(session_id: str, detail: str = "") -> None:
+async def create_ai_vote(session_id: str, detail: str = "", *, show_thinking: bool = False) -> None:
+    if show_thinking:
+        await manager.broadcast(
+            session_id,
+            {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": True},
+        )
     try:
         async with _vote_creation_locks[session_id]:
             with database() as connection:
@@ -788,6 +816,12 @@ async def create_ai_vote(session_id: str, detail: str = "") -> None:
                 await manager.broadcast(session_id, {"type": "message", "message": message})
     except Exception:
         return
+    finally:
+        if show_thinking:
+            await manager.broadcast(
+                session_id,
+                {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": False},
+            )
 
 
 async def _wait_and_analyze(session_id: str, delay_seconds: float = IDLE_TRIGGER_SECONDS) -> None:
@@ -1685,7 +1719,7 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
     )
     if is_vote_request:
         detail = content[len("/投票"):].strip() if content.startswith("/投票") else content
-        asyncio.create_task(create_ai_vote(session_id, detail))
+        asyncio.create_task(create_ai_vote(session_id, detail, show_thinking=True))
     elif is_research_request:
         detail = content.removeprefix("/联网评估").strip()
         detail = re.sub(r"@(AI|RoomAI)\b", "", detail, flags=re.IGNORECASE)
@@ -1696,7 +1730,7 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
             research_query=detail,
         ))
     elif is_summary_request:
-        asyncio.create_task(publish_room_analysis(session_id, auto_vote=False, auto_guidance=False))
+        asyncio.create_task(publish_room_analysis(session_id, auto_vote=False, auto_guidance=False, show_thinking=True))
     elif content.startswith("/对比"):
         asyncio.create_task(publish_idea_comparison(session_id))
     elif content.startswith("/画图"):

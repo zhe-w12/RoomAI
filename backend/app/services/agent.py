@@ -180,7 +180,7 @@ async def complete_chat(
                     )
             return {"content": content.strip(), "tool_calls": tool_calls, "usage": usage, "model": selected_model}
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-            logger.warning("Model call failed (model=%s, attempt=%d): %s", selected_model, attempt + 1, exc)
+            logger.warning("Model call failed (model=%s, attempt=%d): %s: %s", selected_model, attempt + 1, type(exc).__name__, exc)
             if attempt == 1 or sent_delta:
                 return None
     return None

@@ -1108,6 +1108,14 @@ export default function RoomPage() {
     </form>
   </main>;
 
+  const typingText = (() => {
+    const members = typingNames.filter((name) => name !== "RoomAI");
+    const parts: string[] = [];
+    if (typingNames.includes("RoomAI")) parts.push("RoomAI 正在思考…");
+    if (members.length > 0) parts.push(`${members.join("、")} 正在输入…`);
+    return parts.join(" · ");
+  })();
+
   return <main className="room">
     <div className={`side-scrim ${sidebarOpen ? "visible" : ""}`} onClick={() => setSidebarOpen(false)} />
     <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
@@ -1271,7 +1279,7 @@ export default function RoomPage() {
               <div className="msg-body"><MarkdownContent content={item.content} /><i className="stream-cursor" aria-hidden="true" /></div>
             </div>
           </article>)}
-          {typingNames.length > 0 && <div className="typing"><span className="typing-dots"><i /><i /><i /></span>{typingNames.join("、")} 正在输入…</div>}
+          {typingNames.length > 0 && <div className="typing"><span className="typing-dots"><i /><i /><i /></span>{typingText}</div>}
           <div ref={bottomRef} />
         </div>
 
