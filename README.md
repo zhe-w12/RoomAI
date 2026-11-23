@@ -2,7 +2,7 @@
 
 RoomAI 是一个面向小团队的立项讨论聊天室。伙伴通过邀请链接或 6 位邀请码进入房间，围绕一个主题实时讨论；RoomAI 可以生成讨论开场、准备问题，并在成员召唤时梳理讨论内容。
 
-项目按 [DESIGN.md](./DESIGN.md) 推进。技术栈为 FastAPI + WebSocket、LangGraph + SQLite checkpoint、React + Vite + TypeScript + Tailwind；界面优先适配手机，采用白底灰阶与细线布局。部署不在当前阶段范围内。
+技术栈为 FastAPI + WebSocket、LangGraph + SQLite checkpoint、React + Vite + TypeScript + Tailwind；界面优先适配手机。详细设计见 [DESIGN.md](./DESIGN.md)。
 
 ## 本地运行
 
@@ -68,4 +68,8 @@ npm run dev
 - 立项纪要附带项目时间线草案；只有能在讨论或明确待办中找到原文依据的里程碑与时间才会写入。
 - 滚动分析会给出群体讨论氛围观察（活跃、平稳、偏冷或存在分歧）及 RoomAI 下一轮的节奏调整建议；仅依据可观察的群体互动，不判断个人情绪。
 - 房间连续 30 天无活动后自动删除，满 27 天时在房间中提醒一次；发言、加入或更新讨论内容会重置清理计时。天数和检查间隔可通过 `.env` 配置。
+
+## 开源协议
+
+本项目采用 [MIT 协议](./LICENSE)开源。
 
