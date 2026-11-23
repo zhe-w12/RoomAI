@@ -41,6 +41,7 @@ from .database import database, initialize_database
 from .realtime import manager, visitor_for_session
 from .services.brief import ROOM_TEMPLATES, create_room_brief
 from .services.agent import COMMAND_PROMPTS, complete_chat
+from .services.agent_loop import run_agent_loop
 from .services.report import generate_room_report, markdown_to_docx
 from .services.web_search import SearchNotConfigured, SearchUnavailable, search_web
 from .services.room_graph import delete_room_agent_checkpoint, run_room_agent, start_room_agent_graph, stop_room_agent_graph
@@ -1856,12 +1857,6 @@ async def generate_agent_reply(
     stream_id = uuid.uuid4().hex
     stream_started = False
 
-    async def broadcast_delta(content: str) -> None:
-        await manager.broadcast(
-            session_id,
-            {"type": "ai_stream", "stream_id": stream_id, "phase": "delta", "content": content},
-        )
-
     await manager.broadcast(
         session_id,
         {"type": "typing", "visitor_id": "roomai", "nickname": "RoomAI", "active": True},
@@ -1945,24 +1940,21 @@ async def generate_agent_reply(
                 elif not web_sources:
                     prompt += f"\n{search_notice or '没有检索到外部网页来源，请仅使用下方房间资料。'}"
             if answer is None:
-                stream_started = True
-                await manager.broadcast(
-                    session_id,
-                    {"type": "ai_stream", "stream_id": stream_id, "phase": "start"},
-                )
-                answer = await run_room_agent(
-                    session_id=session_id,
-                    topic=room["topic"],
-                    history=history,
-                    prompt=prompt,
+                # Main Agent Loop: the model decides each step — call a tool
+                # or answer directly. Not streamed: tool calls interleave
+                # with model turns, so the reply arrives as one message
+                # (the typing indicator stays on while the loop runs).
+                answer = await run_agent_loop(
+                    room["topic"],
+                    history,
+                    prompt,
                     model=room["model"],
+                    session_id=session_id,
                     phase=room["phase"],
                     summary=json.dumps(summary_context, ensure_ascii=False) if summary_context else None,
                     structured_context=structured_context,
                     member_names=member_names,
                     external_sources=references,
-                    mode="research" if research_query is not None else "conversation",
-                    on_delta=broadcast_delta,
                 )
                 if answer and references:
                     source_lines = []
