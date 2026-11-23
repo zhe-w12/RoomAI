@@ -3,12 +3,15 @@ from __future__ import annotations
 import base64
 import inspect
 import json
+import logging
 import mimetypes
 import math
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from ..config import (
     MODEL_API_KEY,
@@ -176,7 +179,8 @@ async def complete_chat(
                         (session_id, selected_model, usage["prompt_tokens"], usage["completion_tokens"], cost),
                     )
             return {"content": content.strip(), "tool_calls": tool_calls, "usage": usage, "model": selected_model}
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            logger.warning("Model call failed (model=%s, attempt=%d): %s", selected_model, attempt + 1, exc)
             if attempt == 1 or sent_delta:
                 return None
     return None

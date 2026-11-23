@@ -28,7 +28,7 @@ AVAILABLE_MODELS = [
     for item in os.getenv("AVAILABLE_MODELS", MODEL_NAME).split(",")
     if item.strip()
 ]
-MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "45"))
+MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "180"))
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 TAVILY_TIMEOUT_SECONDS = float(os.getenv("TAVILY_TIMEOUT_SECONDS", "15"))
 MODEL_INPUT_PRICE_PER_MILLION = float(os.getenv("MODEL_INPUT_PRICE_PER_MILLION", "0"))
