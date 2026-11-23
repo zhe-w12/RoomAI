@@ -365,16 +365,20 @@ async def publish_room_analysis(
         room = ensure_room(session_id)
         if room["closed_at"]:
             return None
-        result = await run_room_agent(
-            session_id=session_id,
-            topic=room["topic"],
-            history=[],
-            prompt="增量分析当前讨论，更新总结、想法评估和下一步。",
-            model=room["model"],
-            phase=room["phase"],
-            mode="analysis",
-            auto_guidance=auto_guidance,
-        )
+        try:
+            result = await run_room_agent(
+                session_id=session_id,
+                topic=room["topic"],
+                history=[],
+                prompt="增量分析当前讨论，更新总结、想法评估和下一步。",
+                model=room["model"],
+                phase=room["phase"],
+                mode="analysis",
+                auto_guidance=auto_guidance,
+            )
+        except Exception:
+            logger.exception("Room analysis failed for room %s", session_id)
+            result = None
         if not isinstance(result, dict) or not result:
             message = create_message_record(
                 session_id, None, "RoomAI", "agent", "AI 暂时没反应，请稍后再试。讨论消息已经保留。", now_iso()
