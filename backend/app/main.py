@@ -233,6 +233,14 @@ _vote_expiry_tasks: dict[int, asyncio.Task] = {}
 _vote_creation_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _cleanup_task: asyncio.Task | None = None
 
+# 引用 AI 消息时判定“带有疑问”的规则：问号、疑问词、质疑词、要求展开。
+# 只是附和（“说得对”）或引用给别人看（“大家看看”）不触发，避免 AI 无故插话。
+_QUOTE_QUESTION_RE = re.compile(
+    r"[？?]|吗|呢|为什么|怎么|如何|是不是|能不能|可不可以|是否|对吗|真的吗|确定吗|"
+    r"(?<!没)什么|谁|哪|不对|不同意|但是|可是|有问题|质疑|"
+    r"展开|详细说|详细讲|详细点|举例|解释|什么意思|说说|讲讲"
+)
+
 
 def create_message_record(
     session_id: str,
@@ -1551,16 +1559,15 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         image_path = payload.image_url.removeprefix("/uploads/")
     if not content and not image_path:
         raise HTTPException(status_code=422, detail="消息内容不能为空")
-    reply_targets_agent = False
+    quoted = None
     if payload.reply_to_message_id is not None:
         with database() as connection:
-            replied = connection.execute(
-                "SELECT sender_type FROM messages WHERE session_id = ? AND id = ?",
+            quoted = connection.execute(
+                "SELECT sender_type, content FROM messages WHERE session_id = ? AND id = ?",
                 (session_id, payload.reply_to_message_id),
             ).fetchone()
-        if not replied:
+        if not quoted:
             raise HTTPException(status_code=404, detail="引用的消息不存在")
-        reply_targets_agent = replied["sender_type"] == "agent"
     rate = _message_rate[visitor["visitor_id"]]
     now_tick = time.monotonic()
     while rate and now_tick - rate[0] >= 10:
@@ -1600,8 +1607,17 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         asyncio.create_task(publish_red_team(session_id, detail))
         return message
     prompt = ai_prompt(content)
-    if prompt is None and reply_targets_agent:
-        prompt = f"请直接回应成员引用的 RoomAI 回复，并回答其补充内容。成员补充：{content}"
+    # 引用 AI 回复 + 带有疑问/质疑/要求展开 → AI 针对被引用的内容回答。
+    # 已有 @AI/指令触发时不再重复触发（prompt 非空的分支优先）。
+    quote_prompt = None
+    if quoted is not None and quoted["sender_type"] == "agent" and _QUOTE_QUESTION_RE.search(content):
+        quoted_text = (quoted["content"] or "")[:1000]
+        quote_prompt = (
+            "成员引用了你之前的一条回复并提出疑问，请针对被引用的内容直接回答，"
+            "不要重复整条原消息，也不要重新总结整个讨论。\n"
+            f"被引用的你的回复：{quoted_text}\n"
+            f"成员的疑问：{content}"
+        )
     is_vote_request = content.startswith("/投票") or (
         re.search(r"@(AI|RoomAI)\b", content, re.IGNORECASE) and "投票" in content
     )
@@ -1631,6 +1647,9 @@ async def post_message(session_id: str, payload: MessageRequest) -> dict:
         asyncio.create_task(publish_idea_comparison(session_id))
     elif prompt:
         asyncio.create_task(generate_agent_reply(session_id, prompt))
+    elif quote_prompt:
+        # AI 的回答自动引用回用户的这条提问，讨论链路清晰。
+        asyncio.create_task(generate_agent_reply(session_id, quote_prompt, reply_to_message_id=message["id"]))
     return message
 
 
@@ -1712,6 +1731,7 @@ async def generate_agent_reply(
     prompt: str,
     *,
     research_query: str | None = None,
+    reply_to_message_id: int | None = None,
 ) -> None:
     stream_id = uuid.uuid4().hex
     stream_started = False
@@ -1845,7 +1865,7 @@ async def generate_agent_reply(
                     answer += f"\n\n[[suggest_mention:{selected}]]"
         if not answer:
             answer = "我暂时没能连上模型，请稍后重试。你也可以先继续讨论，消息会保留在房间里。"
-        message = create_message_record(session_id, None, "RoomAI", "agent", answer, now_iso())
+        message = create_message_record(session_id, None, "RoomAI", "agent", answer, now_iso(), reply_to_message_id=reply_to_message_id)
         await manager.broadcast(session_id, {"type": "message", "message": message, "stream_id": stream_id})
     except Exception:
         return
