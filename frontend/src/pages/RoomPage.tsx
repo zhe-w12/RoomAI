@@ -2,6 +2,7 @@ import { Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, us
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowDown, ArrowRight, ArrowUp, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Copy, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Settings2, Slash, Sparkles, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
 import { api, FinishReview, Identity, Idea, IdeaStatus, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
+import { memberColor, memberColorAt } from "../lib/memberColor";
 import MarkdownContent from "../components/MarkdownContent";
 import TodoCard from "../components/TodoCard";
 import VoteCard, { Vote } from "../components/VoteCard";
@@ -989,6 +990,9 @@ export default function RoomPage() {
     return messages.filter((message) => message.content.toLowerCase().includes(query) || message.sender_name.toLowerCase().includes(query));
   }, [messages, search]);
   const votesByMessage = useMemo(() => new Map(votes.map((vote) => [vote.message_id, vote])), [votes]);
+  // 成员按加入顺序取色，同房间内不重复；不在列表里（如已离开）时退回哈希取色
+  const memberColorById = useMemo(() => new Map((room?.members || []).map((member, index) => [member.visitor_id, memberColorAt(index)])), [room?.members]);
+  const paletteFor = (visitorId: string | null | undefined, fallbackKey: string) => (visitorId ? memberColorById.get(visitorId) : undefined) || memberColor(fallbackKey);
   const onlineMembers = room?.members.filter((member) => onlineIds.includes(member.visitor_id)) || [];
 
   if (loading) return <div className="room-loading"><span className="brand-mark"><span /><span /><span /></span><span>正在打开讨论室…</span></div>;
@@ -1081,7 +1085,7 @@ export default function RoomPage() {
       {room.closed_at && <a className="sidebar-replay-link" href={`/room/${sessionId}/memo`}><FileText size={15} /><span>立项纪要</span><ArrowRight size={13} /></a>}
       <div className="side-spacer" />
       <div className="side-me">
-        <div className="avatar avatar-sm">{identity.nickname.slice(0, 1)}</div>
+        <div className="avatar avatar-sm" style={paletteFor(identity.visitor_id, identity.nickname)}>{identity.nickname.slice(0, 1)}</div>
         <span><b>{identity.nickname}</b><small>{identity.owner_token ? "房间创建者" : "讨论成员"}</small></span>
       </div>
     </aside>
@@ -1092,7 +1096,7 @@ export default function RoomPage() {
         <div className="topbar-title"><h1 title={room.topic}>{room.topic}</h1></div>
         <button className={`phase-btn ${room.phase === "converge" ? "phase-converge" : ""}`} onClick={togglePhase} disabled={!identity.owner_token || Boolean(room.closed_at)} title={identity.owner_token ? "点击切换讨论阶段" : "发散阶段"}><i />{room.phase === "diverge" ? "发散" : "收敛"}</button>
         {socketStatus !== "connected" && <>{socketStatus === "disconnected" ? <button className="connection-status connection-offline" onClick={() => reconnectNowRef.current?.()}>重试连接</button> : <span className="connection-status" aria-live="polite">{socketStatus === "connecting" ? "连接中…" : "重连中…"}</span>}</>}
-        <div className="online" title={`${onlineMembers.length} 人在线`}><span className="online-stack">{onlineMembers.slice(0, 3).map((member) => <i key={member.visitor_id}>{member.nickname.slice(0, 1)}</i>)}</span><span>{onlineMembers.length} 在线</span></div>
+        <div className="online" title={`${onlineMembers.length} 人在线`}><span className="online-stack">{onlineMembers.slice(0, 3).map((member) => <i key={member.visitor_id} style={paletteFor(member.visitor_id, member.nickname)}>{member.nickname.slice(0, 1)}</i>)}</span><span>{onlineMembers.length} 在线</span></div>
         <span className="top-sep" />
         {unreadMentionIds.length > 0 && <button className="mention-badge" onClick={() => void openUnreadMention()} title="跳转到未读 @ 提醒"><AtSign size={13} /><span>{unreadMentionIds.length}</span></button>}
         <button className={`icon-btn ${searchOpen ? "active" : ""}`} onClick={() => { setSearchOpen((value) => !value); setSearch(""); }} aria-label="搜索消息"><Search size={17} /></button>
@@ -1128,14 +1132,15 @@ export default function RoomPage() {
             const showDateDivider = !previous || localDayKey(previous.created_at) !== localDayKey(message.created_at);
             const messageTodos = (message.todo_ids || []).map((todoId) => todos.find((todo) => todo.id === todoId)).filter((todo): todo is Todo => Boolean(todo));
             const mentioned = !own && message.content.includes(`@${identity.nickname}`);
+            const palette = isAgentMessage ? null : paletteFor(message.visitor_id, message.sender_name);
             const mentionSuggestion = isAgentMessage ? message.content.match(/\[\[suggest_mention:([^\]]+)\]\]\s*$/) : null;
             const visibleContent = mentionSuggestion ? message.content.replace(/\n?\[\[suggest_mention:[^\]]+\]\]\s*$/, "").trim() : message.content;
             return <Fragment key={message.id}>
             {showDateDivider && <div className="date-divider"><span>{formatDayDivider(message.created_at)}</span></div>}
             <article id={`message-${message.id}`} className={`msg ${own ? "msg-own" : ""} ${isAgentMessage ? "msg-agent" : ""} ${mentioned ? "msg-mention" : ""} ${quoteFlash === message.id ? "msg-flash" : ""} ${menu?.message.id === message.id ? "msg-open" : ""}`}>
-              <div className={`avatar msg-avatar ${isAgentMessage ? "avatar-ai" : ""}`}>{isAgentMessage ? <Sparkles size={13} /> : message.sender_name.slice(0, 1)}</div>
+              <div className={`avatar msg-avatar ${isAgentMessage ? "avatar-ai" : ""}`} style={palette || undefined}>{isAgentMessage ? <Sparkles size={13} /> : message.sender_name.slice(0, 1)}</div>
               <div className="msg-main">
-                {showAuthor && <div className="msg-meta"><b className={isAgentMessage ? "agent-name" : ""}>{message.sender_name}</b>{isAgentMessage && <i className="tag-ai">AI</i>}<time>{formatTime(message.created_at)}</time></div>}
+                {showAuthor && <div className="msg-meta"><b className={isAgentMessage ? "agent-name" : ""} style={palette ? { color: palette.color } : undefined}>{message.sender_name}</b>{isAgentMessage && <i className="tag-ai">AI</i>}<time>{formatTime(message.created_at)}</time></div>}
                 <div className={`msg-body ${pressingId === message.id ? "msg-pressing" : ""}`} onPointerDown={(event) => startPress(message, event)} onPointerUp={cancelPress} onPointerLeave={cancelPress} onPointerMove={handlePressMove} onContextMenu={(event) => { event.preventDefault(); if (!message.is_recalled) openMenu(message, event.clientX, event.clientY); }}>
                   {message.reply_to && <button className="quote" onClick={() => jumpToMessage(message.reply_to!.id)}><span><b>{message.reply_to.sender_name}</b><small>{message.reply_to.content}</small></span></button>}
                   {message.is_recalled ? <span className="msg-recalled">这条消息已撤回</span> : <>
@@ -1196,7 +1201,7 @@ export default function RoomPage() {
             </div>
             <div className="composer-input">
               {showCommands && <div className="suggest suggest-cmd">{commands.filter((command) => command.startsWith(composerValue.slice(commandEnd))).map((command) => <button type="button" onClick={() => void selectCommand(command)} key={command}><span>{command}</span><small>RoomAI 快捷指令</small></button>)}</div>}
-              {mentionMatch && mentionOptions.length > 0 && <div className="suggest suggest-mention"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-sm avatar-ai"><Sparkles size={12} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className="avatar avatar-sm">{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
+              {mentionMatch && mentionOptions.length > 0 && <div className="suggest suggest-mention"><button type="button" onClick={selectRoomAI}><span className="avatar avatar-sm avatar-ai"><Sparkles size={12} /></span><b>RoomAI</b><small>AI 助手</small></button>{mentionOptions.map((member) => <button type="button" onClick={() => selectMention(member)} key={member.visitor_id}><span className="avatar avatar-sm" style={paletteFor(member.visitor_id, member.nickname)}>{member.nickname.slice(0, 1)}</span><b>{member.nickname}</b>{member.is_owner ? <small>房主</small> : null}</button>)}</div>}
               <textarea ref={composerRef} rows={1} maxLength={2000} value={composerValue} disabled={Boolean(room.closed_at) || voiceListening} onChange={(event) => { handleTyping(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 140)}px`; }} onKeyDown={onComposerKey} placeholder={room.closed_at ? "讨论已结束" : voiceListening ? "正在聆听…点击麦克风结束后可编辑" : anonymousSubmission ? "写下匿名想法；所有成员都能看到内容，但看不到你的身份" : "说说你的想法…（输入 / 查看指令，@ 提及伙伴）"} />
             </div>
             <button className="send-btn" disabled={Boolean(room.closed_at) || sending || voiceListening || (!composerValue.trim() && !selectedImage)} aria-label="发送消息">{sending ? <LoaderCircle size={17} className="spin" /> : <ArrowUp size={17} />}</button>
