@@ -1132,7 +1132,7 @@ export default function RoomPage() {
             const visibleContent = mentionSuggestion ? message.content.replace(/\n?\[\[suggest_mention:[^\]]+\]\]\s*$/, "").trim() : message.content;
             return <Fragment key={message.id}>
             {showDateDivider && <div className="date-divider"><span>{formatDayDivider(message.created_at)}</span></div>}
-            <article id={`message-${message.id}`} className={`msg ${own ? "msg-own" : ""} ${mentioned ? "msg-mention" : ""} ${quoteFlash === message.id ? "msg-flash" : ""} ${menu?.message.id === message.id ? "msg-open" : ""}`}>
+            <article id={`message-${message.id}`} className={`msg ${own ? "msg-own" : ""} ${isAgentMessage ? "msg-agent" : ""} ${mentioned ? "msg-mention" : ""} ${quoteFlash === message.id ? "msg-flash" : ""} ${menu?.message.id === message.id ? "msg-open" : ""}`}>
               <div className={`avatar msg-avatar ${isAgentMessage ? "avatar-ai" : ""}`}>{isAgentMessage ? <Sparkles size={13} /> : message.sender_name.slice(0, 1)}</div>
               <div className="msg-main">
                 {showAuthor && <div className="msg-meta"><b className={isAgentMessage ? "agent-name" : ""}>{message.sender_name}</b>{isAgentMessage && <i className="tag-ai">AI</i>}<time>{formatTime(message.created_at)}</time></div>}
