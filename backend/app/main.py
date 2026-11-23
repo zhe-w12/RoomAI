@@ -769,14 +769,15 @@ async def create_ai_vote(session_id: str, detail: str = "") -> None:
         return
 
 
-async def _wait_and_analyze(session_id: str) -> None:
+async def _wait_and_analyze(session_id: str, delay_seconds: float = IDLE_TRIGGER_SECONDS) -> None:
     try:
-        await asyncio.sleep(IDLE_TRIGGER_SECONDS)
+        await asyncio.sleep(max(0, delay_seconds))
         if pending_user_messages(session_id) >= IDLE_TRIGGER_MIN_MESSAGES:
             await publish_room_analysis(session_id)
     except asyncio.CancelledError:
         raise
     except Exception:
+        logger.exception("Idle room analysis failed for room %s", session_id)
         return
     finally:
         current = asyncio.current_task()
@@ -784,14 +785,45 @@ async def _wait_and_analyze(session_id: str) -> None:
             _idle_tasks.pop(session_id, None)
 
 
-def schedule_room_analysis(session_id: str) -> None:
+def schedule_room_analysis(session_id: str, *, delay_seconds: float = IDLE_TRIGGER_SECONDS) -> None:
     existing = _idle_tasks.pop(session_id, None)
     if existing and not existing.done():
         existing.cancel()
     if pending_user_messages(session_id) >= FALLBACK_TRIGGER_MESSAGES:
         asyncio.create_task(publish_room_analysis(session_id))
     else:
-        _idle_tasks[session_id] = asyncio.create_task(_wait_and_analyze(session_id))
+        _idle_tasks[session_id] = asyncio.create_task(_wait_and_analyze(session_id, delay_seconds))
+
+
+def resume_pending_room_analyses() -> None:
+    with database() as connection:
+        rooms = connection.execute(
+            """SELECT m.session_id, COUNT(*) AS pending_count, MAX(m.created_at) AS latest_message_at
+               FROM messages m
+               JOIN rooms r ON r.session_id = m.session_id
+               WHERE r.closed_at IS NULL AND m.sender_type = 'user' AND m.is_recalled = 0
+                 AND m.id > COALESCE(
+                     (SELECT s.through_message_id FROM summaries s
+                      WHERE s.session_id = m.session_id ORDER BY s.version DESC LIMIT 1),
+                     0
+                 )
+               GROUP BY m.session_id
+               HAVING COUNT(*) >= ?""",
+            (IDLE_TRIGGER_MIN_MESSAGES,),
+        ).fetchall()
+
+    now = datetime.now(timezone.utc)
+    for room in rooms:
+        try:
+            latest_message_at = datetime.fromisoformat(room["latest_message_at"])
+            if latest_message_at.tzinfo is None:
+                latest_message_at = latest_message_at.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            logger.warning("Skipping idle summary recovery for room %s with an invalid message timestamp", room["session_id"])
+            continue
+        elapsed_seconds = (now - latest_message_at).total_seconds()
+        remaining_seconds = max(0, IDLE_TRIGGER_SECONDS - elapsed_seconds)
+        schedule_room_analysis(room["session_id"], delay_seconds=remaining_seconds)
 
 
 def _safe_remove_room_uploads(session_id: str) -> None:
@@ -915,6 +947,7 @@ async def startup() -> None:
         remaining = max(0, int((datetime.fromisoformat(vote["closes_at"]) - datetime.now(timezone.utc)).total_seconds()))
         _vote_expiry_tasks[vote["id"]] = asyncio.create_task(expire_vote_after(vote["session_id"], vote["id"], remaining))
     await cleanup_inactive_rooms()
+    resume_pending_room_analyses()
     _cleanup_task = asyncio.create_task(room_cleanup_loop())
 
 
