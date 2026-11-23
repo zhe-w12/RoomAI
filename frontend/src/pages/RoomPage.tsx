@@ -1021,7 +1021,6 @@ export default function RoomPage() {
 
       <div className="side-room">
         <span className="side-room-name">{room.topic}</span>
-        <button className="icon-btn" onClick={copyInvite} aria-label="复制邀请链接" title="复制邀请链接">{linkCopied ? <Check size={15} /> : <Clipboard size={15} />}</button>
       </div>
 
       <div className="side-label-row">
@@ -1230,13 +1229,10 @@ export default function RoomPage() {
           {!identity.owner_token && <p className="field-note">只有房主可以修改红队设置。</p>}
         </div>
         <div className="settings-usage"><b>本次讨论用量</b><span>{(usage?.total_tokens || 0).toLocaleString("zh-CN")} tokens</span><small>{usage?.cost_configured ? `估算费用 ¥${usage.cost_estimate.toFixed(4)}` : "费用价格未配置；可在 .env 设置模型单价。"}</small></div>
-        <div className="settings-block">
-          <button className="btn btn-block" onClick={() => void copyInvite()}>{linkCopied ? <ClipboardCheck size={15} /> : <Clipboard size={15} />} {linkCopied ? "已复制邀请链接" : "复制邀请链接"}</button>
-          <p className="field-note">房主凭证保存在当前浏览器，清除浏览器数据后将无法管理房间。</p>
-        </div>
-        <div className="settings-block">
-          {room.closed_at ? <a className="btn btn-primary btn-block" href={`/room/${sessionId}/memo`}><FileText size={15} />查看立项纪要</a> : identity.owner_token ? <button className="btn btn-primary btn-block" onClick={() => void startFinishReview()}><Check size={15} />结束讨论并生成纪要</button> : <p className="field-note">只有房主可以结束讨论并生成纪要。</p>}
-        </div>
+        {identity.owner_token && <p className="field-note">房主凭证保存在当前浏览器，清除浏览器数据后将无法管理房间。</p>}
+        {!room.closed_at && <div className="settings-block">
+          {identity.owner_token ? <button className="btn btn-primary btn-block" onClick={() => void startFinishReview()}><Check size={15} />结束讨论并生成纪要</button> : <p className="field-note">只有房主可以结束讨论并生成纪要。</p>}
+        </div>}
         {identity.owner_token && <div className="settings-block danger-zone">
           <button className="btn btn-block btn-danger-outline" onClick={() => { setRoomDeleteError(""); setSettingsOpen(false); setRoomDeleteOpen(true); }}><Trash2 size={15} />删除房间</button>
           <p className="field-note">永久删除房间、消息、讨论资料和图片，删除后无法恢复。</p>
