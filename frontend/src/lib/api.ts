@@ -238,7 +238,7 @@ export const api = {
     }),
   getRoomReport: (sessionId: string, visitorId: string) =>
     request<RoomReport>(`/api/rooms/${sessionId}/report?visitor_id=${encodeURIComponent(visitorId)}`),
-  roomReportExportUrl: (sessionId: string, visitorId: string, format: "md" | "docx") =>
+  roomReportExportUrl: (sessionId: string, visitorId: string, format: "md" | "docx" | "pdf") =>
     `${API_BASE}/api/rooms/${sessionId}/report/export.${format}?visitor_id=${encodeURIComponent(visitorId)}`,
   getVotes: (sessionId: string, visitorId: string) =>
     request<{ votes: import("../components/VoteCard").Vote[] }>(`/api/rooms/${sessionId}/votes?visitor_id=${encodeURIComponent(visitorId)}`),

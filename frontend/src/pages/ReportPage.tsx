@@ -32,8 +32,9 @@ export default function ReportPage() {
         {identity && <>
           <a className="btn" href={api.roomReportExportUrl(sessionId, identity.visitor_id, "md")}><Download size={14} />Markdown</a>
           <a className="btn" href={api.roomReportExportUrl(sessionId, identity.visitor_id, "docx")}><FileText size={14} />Word</a>
+          <a className="btn btn-primary" href={api.roomReportExportUrl(sessionId, identity.visitor_id, "pdf")}><Download size={14} />导出 PDF</a>
         </>}
-        <button className="btn btn-primary" onClick={() => window.print()}><Printer size={14} />打印 / 导出 PDF</button>
+        <button className="btn" onClick={() => window.print()}><Printer size={14} />打印</button>
       </nav>
     </header>
     <article className="report-content">

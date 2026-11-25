@@ -46,7 +46,7 @@ from .realtime import manager, visitor_for_session
 from .services.brief import ROOM_TEMPLATES, create_room_brief
 from .services.agent import COMMAND_PROMPTS, complete_chat
 from .services.agent_loop import run_agent_loop
-from .services.report import generate_room_report, markdown_to_docx
+from .services.report import generate_room_report, markdown_to_docx, markdown_to_pdf
 from .services.web_search import SearchNotConfigured, SearchUnavailable, search_web
 from .services.room_graph import delete_room_agent_checkpoint, run_room_agent, start_room_agent_graph, stop_room_agent_graph
 from .services.documents import (
@@ -2401,6 +2401,21 @@ def export_room_report_docx(session_id: str, visitor_id: str) -> Response:
         document,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": "attachment; filename=roomai-report.docx"},
+    )
+
+
+@app.get("/api/rooms/{session_id}/report/export.pdf")
+def export_room_report_pdf(session_id: str, visitor_id: str) -> Response:
+    report = get_room_report(session_id, visitor_id)
+    content = f"{report['minutes_markdown']}\n\n---\n\n{report['proposal_markdown']}\n\n---\n\n{report['retrospective_markdown']}"
+    try:
+        document = markdown_to_pdf(content)
+    except ImportError as exc:
+        raise HTTPException(status_code=501, detail="PDF 导出依赖未安装，请稍后重试") from exc
+    return Response(
+        document,
+        media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=roomai-report.pdf"},
     )
 
 

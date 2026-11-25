@@ -1,5 +1,6 @@
-import { Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { Virtuoso, VirtuosoHandle } from "react-virtuoso";
 import { ArrowDown, ArrowRight, ArrowUp, AtSign, Check, ChevronDown, Clipboard, ClipboardCheck, Clock3, Copy, Ellipsis, EyeOff, FilePlus2, FileText, History, ImagePlus, LoaderCircle, Menu, Mic, Reply, Search, Settings2, ThumbsDown, ThumbsUp, Trash2, Undo2, X } from "lucide-react";
 import { api, FinishReview, Identity, Idea, IdeaStatus, LlmConfig, loadIdentity, Member, Message, Room, RoomDocument, RoomSearchResult, RoomUsage, saveIdentity, SummaryVersion, Todo } from "../lib/api";
 import { memberColor, memberColorAt } from "../lib/memberColor";
@@ -10,6 +11,10 @@ import VoteCard, { Vote } from "../components/VoteCard";
 
 const commands = ["/总结", "/评估", "/联网评估", "/投票", "/对比", "/画图", "/挑战", "/用户视角", "/待办", "/结束", "/帮助"];
 const MESSAGE_PAGE_SIZE = 100;
+// Virtuoso 的 firstItemIndex 是 data[0] 的绝对索引。prepend 时它必须减小（新项
+// 占更小的绝对索引，已有消息的绝对索引才不变、视图才不跳）；从一个很大的基数
+// 起步才有减的空间。换整页数据时归零到这个基数。
+const FIRST_ITEM_INDEX_BASE = 100000;
 const dimensionLabels = [["用户", "user"], ["技术", "technology"], ["时间", "time"], ["成本", "cost"], ["风险", "risk"]] as const;
 const atmosphereLabels = { active: "讨论活跃", steady: "节奏平稳", quiet: "讨论偏冷", tense: "存在明显分歧" } as const;
 const ideaStatusLabels: Record<IdeaStatus, string> = { considering: "讨论中", pending: "待定", adopted: "已采纳", rejected: "已否决" };
@@ -148,6 +153,9 @@ export default function RoomPage() {
   const [nearBottom, setNearBottom] = useState(true);
   const [hasOlder, setHasOlder] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // 虚拟滚动的 firstItemIndex：上滑 prepend 时同步减小，保证已有消息的绝对
+  // 索引不变（跳转定位和滚动位置都靠它）；换整页数据时归零到基数。
+  const [firstItemIndex, setFirstItemIndex] = useState(FIRST_ITEM_INDEX_BASE);
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState("");
   const [quoteFlash, setQuoteFlash] = useState<number | null>(null);
@@ -168,11 +176,36 @@ export default function RoomPage() {
   const loadingOlderRef = useRef(false);
   const viewingOldWindowRef = useRef(false);
   const reloadingLatestRef = useRef(false);
-  const prevScrollTopRef = useRef(0);
-  const pendingScrollAdjustRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  // 跳转到旧消息后短时间内不响应“滑到底回最新”：换页瞬间 Virtuoso 可能短暂
+  // 报告 atBottom，误触会把刚跳到的旧窗口盖掉。
+  const jumpSuppressRef = useRef(false);
+  // 上滑加载的冷却：prepend 后 Virtuoso 要一两帧才把 scrollTop 调整到位，
+  // 间隙里 rangeChanged 会再次触发；冷却期内忽略，避免一次上滑把整房历史全拉下来。
+  const lastLoadOlderAtRef = useRef(0);
+  // search 的 ref 镜像：jumpToMessage 在 setTimeout 回调里读 state 会拿到旧闭包，
+  // 递归清过滤时永远退不出；ref 同步更新，没有这个问题。
+  const searchRef = useRef("");
+  // 滚动定位用的最新列表长度（ref 镜像）：scrollToBottom 常在 setTimeout 回调
+  // 里跑，直接读 state 会拿到旧闭包（换页后长度变了，定位就偏）。
+  const listLengthRef = useRef(0);
+  // 上滑加载：用 rangeChanged 而不用 startReached——startReached 是边沿触发，
+  // 挂载时若先报了一次“已在顶部”，之后滚到底再滚回顶不会再触发（实测）；
+  // rangeChanged 每次渲染范围变化都会报，可靠。范围顶部到达第一条已加载
+  // 消息时启动 300ms 确认：初始渲染/换页时范围也会短暂从 0 开始，300ms 后
+  // 视图早已滚到底；用户真的上滑到顶时，300ms 后还在顶部。
+  const topReachedTimerRef = useRef<number | null>(null);
+  function handleRangeChanged(range: { startIndex: number; endIndex: number }) {
+    // startIndex 可能是数据下标（0）或绝对索引（firstItemIndex），两种都认。
+    if (range.startIndex !== 0 && range.startIndex !== firstItemIndex) return;
+    if (topReachedTimerRef.current !== null) return;
+    topReachedTimerRef.current = window.setTimeout(() => {
+      topReachedTimerRef.current = null;
+      const list = document.querySelector(".msg-list");
+      if (list && list.scrollTop < 100) void loadOlder();
+    }, 300);
+  }
   const reconnectNowRef = useRef<(() => void) | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const commandEnd = composerValue.lastIndexOf("/");
   const showCommands = commandEnd >= 0 && composerValue.slice(commandEnd).trim().length <= 8 && !composerValue.slice(commandEnd).trim().includes(" ") && composerValue.slice(0, commandEnd).trim() === "";
@@ -259,6 +292,7 @@ export default function RoomPage() {
         if (canceled) return;
         setRoom(nextRoom);
         setMessages(nextMessages);
+        setFirstItemIndex(FIRST_ITEM_INDEX_BASE);
         hasOlderRef.current = nextMessages.length >= MESSAGE_PAGE_SIZE;
         setHasOlder(hasOlderRef.current);
         viewingOldWindowRef.current = false;
@@ -306,16 +340,15 @@ export default function RoomPage() {
 
   useEffect(() => { nearBottomRef.current = nearBottom; }, [nearBottom]);
 
+  useEffect(() => { searchRef.current = search; }, [search]);
+
   useEffect(() => {
     if (loading || !window.location.hash.startsWith("#message-")) return;
     const messageId = Number(window.location.hash.slice("#message-".length));
     if (!Number.isInteger(messageId)) return;
-    const timer = window.setTimeout(() => {
-      document.getElementById(`message-${messageId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-      setQuoteFlash(messageId);
-      setNearBottom(false);
-      window.setTimeout(() => setQuoteFlash(null), 1500);
-    }, 120);
+    // 复用 jumpToMessage：目标可能不在首屏渲染的虚拟窗口里，需要 scrollToIndex
+    // 定位，极端情况下还要先拉 around 窗口。
+    const timer = window.setTimeout(() => { void jumpToMessage(messageId); }, 120);
     return () => window.clearTimeout(timer);
   }, [loading, sessionId]);
 
@@ -476,42 +509,48 @@ export default function RoomPage() {
     };
   }, [applyMessage, identity?.nickname, identity?.session_id, identity?.visitor_id, loading, navigate, sessionId]);
 
+  // 新消息到底部自动滚：在底部时消息一到就跟随；初始加载也靠它定位到底部
+  // （不用 initialTopMostItemIndex：它靠估算高度定位，实测偏 300px，且会
+  // 和手动滚动打架；也不用 Virtuoso 的 followOutput：它在 initialTopMostItemIndex
+  // 下实测不触发，源码里它被 scrolledToInitialItem 门控）。
   useEffect(() => {
-    if (nearBottom) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-      setNewMessages(false);
-    }
+    if (!nearBottom || messages.length === 0) return;
+    scrollToBottom();
   }, [messages, nearBottom]);
+
+  // 流式回复和思考提示在 footer 里、不是 data 的一部分，内容变化时要手动滚到底。
+  function scrollToBottom() {
+    // 不要用平滑滚动：远距离平滑动画的目标会在动画开始时被钳制到偏小的
+    // 估算高度，滚不到底；也不要只 scrollTo({ top: 巨大值 })，同理。
+    // scrollToIndex 按索引定位，Virtuoso 会边测量边修正，能收敛到真正的底部。
+    // 目标索引每次现算（读 ref）：回调里读 state 是旧闭包，换页后会偏。
+    const go = () => {
+      const length = listLengthRef.current;
+      if (length === 0) return;
+      // 注意：scrollToIndex 的 index 是数据下标（0 起），不是绝对索引。
+      virtuosoRef.current?.scrollToIndex({ index: length - 1, align: "end", behavior: "auto" });
+    };
+    go();
+    // 换页后 Virtuoso 异步处理新数据、测量高度，首次定位可能偏短（实测差
+    // 200 多 px）；300ms 后再定一次位（已到底时是空操作），随后补一次到底，
+    // 揭示 footer 里的思考提示/流式气泡。
+    window.setTimeout(() => {
+      go();
+      window.setTimeout(() => virtuosoRef.current?.scrollTo({ top: 1000000000, behavior: "auto" }), 100);
+    }, 300);
+  }
 
   useEffect(() => {
     if (!nearBottom || !streamingMessages.length) return;
-    const frame = window.requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "auto" }));
+    const frame = window.requestAnimationFrame(() => scrollToBottom());
     return () => window.cancelAnimationFrame(frame);
   }, [nearBottom, streamingMessages]);
 
   // 思考/输入提示出现时也滚到底，否则列表满时它会被输入框挡住一半。
   useEffect(() => {
     if (!nearBottom || typingNames.length === 0) return;
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    scrollToBottom();
   }, [typingNames, nearBottom]);
-
-  // 上滑加载更早的消息后，把多出的高度补回 scrollTop，视觉位置不动。
-  // 必须用 useLayoutEffect：它在 DOM 提交后、绘制前同步执行，能读到新 scrollHeight；
-  // setTimeout 方案不可靠——回调可能在 React 提交之前跑，读到的还是旧高度。
-  // 防重入锁也在这里解：fetch 完成后、提交之前，平滑滚动动画还在一帧一帧地
-  // 触发 onScroll，锁解早了会拿到旧的 messages[0].id，同一页被重复拉两次。
-  useLayoutEffect(() => {
-    const pending = pendingScrollAdjustRef.current;
-    if (!pending || !listRef.current) return;
-    pendingScrollAdjustRef.current = null;
-    const list = listRef.current;
-    const prevBehavior = list.style.scrollBehavior;
-    list.style.scrollBehavior = "auto";
-    list.scrollTop = pending.prevTop + (list.scrollHeight - pending.prevHeight);
-    list.style.scrollBehavior = prevBehavior;
-    loadingOlderRef.current = false;
-    setLoadingOlder(false);
-  }, [messages]);
 
   useEffect(() => {
     if (!selectedImage) { setImagePreview(""); return; }
@@ -544,6 +583,7 @@ export default function RoomPage() {
       ]);
       setRoom(nextRoom);
       setMessages(nextMessages);
+      setFirstItemIndex(FIRST_ITEM_INDEX_BASE);
       hasOlderRef.current = nextMessages.length >= MESSAGE_PAGE_SIZE;
       setHasOlder(hasOlderRef.current);
       viewingOldWindowRef.current = false;
@@ -1004,31 +1044,35 @@ export default function RoomPage() {
     } catch { setError("复制失败，请手动复制浏览器地址"); }
   }
 
-  // 上滑加载更早的消息：拼到列表前面，滚动位置由 useLayoutEffect 补回。
+  // 上滑加载更早的消息：拼到列表前面；firstItemIndex 同步减小，Virtuoso 会
+  // 自动保持视觉位置不动（不需要再手动补 scrollTop）。
   async function loadOlder() {
     if (!identity || loadingOlderRef.current || !hasOlderRef.current || messages.length === 0) return;
+    if (Date.now() - lastLoadOlderAtRef.current < 1000) return;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
-    const list = listRef.current;
-    const prevHeight = list?.scrollHeight ?? 0;
-    const prevTop = list?.scrollTop ?? 0;
     try {
       const older = await api.getMessages(sessionId, identity.visitor_id, { before: messages[0].id, limit: MESSAGE_PAGE_SIZE });
       if (older.length < MESSAGE_PAGE_SIZE) { hasOlderRef.current = false; setHasOlder(false); }
       if (older.length > 0) {
-        pendingScrollAdjustRef.current = { prevHeight, prevTop };
-        // 按 id 去重：锁的释放点在提交后，但极端时序下仍可能重复拉到同一页。
-        setMessages((current) => {
-          const known = new Set(current.map((message) => message.id));
-          return [...older.filter((message) => !known.has(message.id)), ...current];
-        });
-        return;
+        // 按 id 去重（极端时序下同一页可能被重复拉到）；firstItemIndex 只减
+        // 实际拼上的条数，否则跳转定位会错位。
+        const known = new Set(messages.map((message) => message.id));
+        const fresh = older.filter((message) => !known.has(message.id));
+        if (fresh.length > 0) {
+          setFirstItemIndex((current) => current - fresh.length);
+          setMessages((current) => {
+            const currentKnown = new Set(current.map((message) => message.id));
+            return [...fresh.filter((message) => !currentKnown.has(message.id)), ...current];
+          });
+        }
       }
     } catch { /* 保持现状，下次滚到顶再试 */ }
-    // 只有没拼上新消息（拉到 0 条或失败）才在这里解锁；拼上了的由
-    // useLayoutEffect 在提交后解锁，避免平滑滚动动画期间重复触发。
-    loadingOlderRef.current = false;
-    setLoadingOlder(false);
+    finally {
+      lastLoadOlderAtRef.current = Date.now();
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
   }
 
   // 跳转到旧消息后回到最新：重新拉最新一页，补上跳转期间错过的中间消息。
@@ -1039,20 +1083,36 @@ export default function RoomPage() {
     try {
       const latest = await api.getMessages(sessionId, identity.visitor_id, { limit: MESSAGE_PAGE_SIZE });
       setMessages(latest);
+      setFirstItemIndex(FIRST_ITEM_INDEX_BASE);
       hasOlderRef.current = latest.length >= MESSAGE_PAGE_SIZE;
       setHasOlder(hasOlderRef.current);
       setNearBottom(true);
+      // 换页是整页替换，显式滚到底（目标索引读 ref，80ms 后渲染已完成）。
+      window.setTimeout(() => scrollToBottom(), 80);
     } catch { /* 保持现状 */ }
     finally { reloadingLatestRef.current = false; }
   }
 
   async function jumpToMessage(messageId: number) {
-    const target = document.getElementById(`message-${messageId}`);
-    if (target) {
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    // 搜索过滤时 data 是子集、索引对不上：先清过滤，等一帧后再跳。
+    // 读 searchRef 而不是 search：setTimeout 回调里的 state 是旧闭包，递归永不退出。
+    if (searchRef.current.trim()) {
+      searchRef.current = "";
+      setSearch("");
+      window.setTimeout(() => { void jumpToMessage(messageId); }, 100);
+      return;
+    }
+    const flash = () => {
       setQuoteFlash(messageId);
       window.setTimeout(() => setQuoteFlash(null), 1500);
       setNearBottom(false);
+    };
+    const loadedIndex = messages.findIndex((message) => message.id === messageId);
+    if (loadedIndex >= 0) {
+      // 虚拟滚动下目标可能不在 DOM 里，用 scrollToIndex 定位（index 是数据
+      // 下标，不是绝对索引）。用 instant：远距离平滑滚动要边测边修正，收敛慢。
+      virtuosoRef.current?.scrollToIndex({ index: loadedIndex, align: "center", behavior: "auto" });
+      flash();
       return;
     }
     // 目标不在已加载的消息里：拉它前后各半页再跳。
@@ -1060,17 +1120,33 @@ export default function RoomPage() {
     try {
       const windowMessages = await api.getMessages(sessionId, identity.visitor_id, { around: messageId, limit: MESSAGE_PAGE_SIZE });
       if (!windowMessages.some((message) => message.id === messageId)) { showToast("找不到这条消息。"); return; }
+      // 先关跟随：换页会触发 [messages, nearBottom] 的自动滚到底，和跳转定位打架。
+      setNearBottom(false);
+      jumpSuppressRef.current = true;
       setMessages(windowMessages);
+      setFirstItemIndex(FIRST_ITEM_INDEX_BASE);
       hasOlderRef.current = true;
       setHasOlder(true);
       viewingOldWindowRef.current = windowMessages[windowMessages.length - 1].id < lastMessageIdRef.current;
+      const targetIndex = windowMessages.findIndex((message) => message.id === messageId);
+      // 注意：scrollToIndex 的 index 是数据下标（0 起），不是绝对索引——实测
+      // 传绝对索引（BASE + targetIndex）会被钳制到最后一项，视图完全不动。
+      const go = () => virtuosoRef.current?.scrollToIndex({ index: targetIndex, align: "center", behavior: "auto" });
+      // 等 Virtuoso 处理完新页数据再定位；200ms 在慢机器上可能不够，700ms、
+      // 1200ms 再补两次（已定位时是空操作）。
+      window.setTimeout(() => { go(); flash(); }, 200);
+      window.setTimeout(go, 700);
+      window.setTimeout(go, 1200);
+      // 换页瞬间 Virtuoso 可能短暂报告 atBottom，解除压制前不响应“滑到底回
+      // 最新”。解除必须放在最后一次重试之后：若重试还没把视图带离底部就解除，
+      // 下面的补查会误判“人在底部”而回最新，把刚拉的窗口覆盖掉（实测）。
+      // 解除时如果人已在底部（1400ms 内滑到底的），补一次回最新，否则 atBottom
+      // 状态不变、不会再触发，就卡在旧窗口了。
       window.setTimeout(() => {
-        document.getElementById(`message-${messageId}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-        setQuoteFlash(messageId);
-        window.setTimeout(() => setQuoteFlash(null), 1500);
-      }, 80);
-      setNearBottom(false);
-    } catch { showToast("加载消息失败，请稍后再试。"); }
+        jumpSuppressRef.current = false;
+        if (nearBottomRef.current && viewingOldWindowRef.current) void reloadLatest();
+      }, 1400);
+    } catch { jumpSuppressRef.current = false; showToast("加载消息失败，请稍后再试。"); }
   }
 
   function selectSearchResult(result: RoomSearchResult) {
@@ -1100,25 +1176,13 @@ export default function RoomPage() {
     catch { setUnreadMentionIds(ids); }
   }
 
-  function onScroll() {
-    if (!listRef.current) return;
-    // 菜单不随滚动关闭：新消息到来时的自动滚动也会触发 onScroll，
-    // 之前就是它把打开的菜单关掉，导致撤回按钮在点击前从 DOM 脱离。
-    // 菜单打开时有全屏遮罩，用户本来也滚不动列表，遮罩点击 / Esc / 选动作就够关了。
-    const list = listRef.current;
-    // 只响应用户主动上滑：初次加载时列表从顶部平滑滚到底，途中的 scrollTop 也 < 200，
-    // 方向判断能排除这次程序滚动（向下），否则会误触，把整间房的消息全拉下来。
-    const scrollingUp = list.scrollTop < prevScrollTopRef.current;
-    prevScrollTopRef.current = list.scrollTop;
-    const remaining = list.scrollHeight - list.scrollTop - list.clientHeight;
-    const atBottom = remaining < 120;
+  // Virtuoso 的 atBottomStateChange 只在“在底部 / 不在底部”切换时触发。
+  // 上滑加载由 rangeChanged 负责，不需要再读 scrollTop。
+  function handleAtBottomChange(atBottom: boolean) {
     setNearBottom(atBottom);
     if (atBottom) setNewMessages(false);
-    // 回到最新只响应用户主动下滑到底：跳转到旧消息时列表内容会缩短，浏览器把
-    // scrollTop 往上钳制到新的最大值，那次滚动方向是向上，不能触发重载，否则
-    // 跳转刚完成就被最新一页盖掉。
-    if (atBottom && viewingOldWindowRef.current && !scrollingUp) { void reloadLatest(); return; }
-    if (scrollingUp && !atBottom && list.scrollTop < 200) void loadOlder();
+    // 在旧窗口里滑到底 → 回最新一页；跳转后 1400ms 内不触发（见 jumpToMessage）。
+    if (atBottom && viewingOldWindowRef.current && !jumpSuppressRef.current) void reloadLatest();
   }
 
   async function selectCommand(command: string) {
@@ -1212,11 +1276,40 @@ export default function RoomPage() {
     const query = search.trim().toLowerCase();
     return messages.filter((message) => message.content.toLowerCase().includes(query) || message.sender_name.toLowerCase().includes(query));
   }, [messages, search]);
+  // 滚动定位用的最新列表长度（必须放 filteredMessages 定义之后，依赖数组
+  // 在 useEffect 调用时求值，放前面会读到未声明的变量）。
+  useEffect(() => {
+    listLengthRef.current = filteredMessages.length;
+  }, [filteredMessages.length]);
   const votesByMessage = useMemo(() => new Map(votes.map((vote) => [vote.message_id, vote])), [votes]);
   // 成员按加入顺序取色，同房间内不重复；不在列表里（如已离开）时退回哈希取色
   const memberColorById = useMemo(() => new Map((room?.members || []).map((member, index) => [member.visitor_id, memberColorAt(index)])), [room?.members]);
   const paletteFor = (visitorId: string | null | undefined, fallbackKey: string) => (visitorId ? memberColorById.get(visitorId) : undefined) || memberColor(fallbackKey);
   const onlineMembers = room?.members.filter((member) => onlineIds.includes(member.visitor_id)) || [];
+
+  const typingText = (() => {
+    const members = typingNames.filter((name) => name !== "RoomAI");
+    const parts: string[] = [];
+    if (typingNames.includes("RoomAI")) parts.push("RoomAI 正在思考…");
+    if (members.length > 0) parts.push(`${members.join("、")} 正在输入…`);
+    return parts.join(" · ");
+  })();
+
+  // Virtuoso 的 Header/Footer 组件必须保持引用稳定：内联定义会在每次渲染时
+  // 卸载重挂（思考计时器会重置），所以用 useMemo 包起来。
+  // 注意：必须放在 early return 之前，否则 hook 数量会随渲染变化（React #310）。
+  const listComponents = useMemo(() => ({
+    Header: () => (loadingOlder ? <div className="msg-start">正在加载更早的消息…</div> : hasOlder ? <div className="msg-start">上滑加载更早的消息</div> : <div className="msg-start">讨论从这里开始</div>),
+    Footer: () => (<>
+      {streamingMessages.filter((item) => item.content).map((item) => <article className="msg msg-agent-streaming" key={item.stream_id}>
+        <div className="avatar msg-avatar avatar-ai"><BrandMark /></div>
+        <div className="msg-main"><div className="msg-meta"><b className="agent-name">RoomAI</b><i className="tag-ai">AI</i><time>{formatTime(item.created_at)}</time></div>
+          <div className="msg-body"><MarkdownContent content={item.content} /><i className="stream-cursor" aria-hidden="true" /></div>
+        </div>
+      </article>)}
+      {typingNames.length > 0 && <div className="typing"><span className="typing-dots"><i /><i /><i /></span>{typingText}{thinkingSince !== null && typingNames.includes("RoomAI") && <span className="typing-timer">· <ThinkingTimer since={thinkingSince} /></span>}</div>}
+    </>),
+  }), [loadingOlder, hasOlder, streamingMessages, typingNames, typingText, thinkingSince]);
 
   if (loading) return <div className="room-loading"><BrandMark /><span>正在打开讨论室…</span></div>;
 
@@ -1233,14 +1326,6 @@ export default function RoomPage() {
       <a className="join-back" href="/">返回 RoomAI 首页</a>
     </form>
   </main>;
-
-  const typingText = (() => {
-    const members = typingNames.filter((name) => name !== "RoomAI");
-    const parts: string[] = [];
-    if (typingNames.includes("RoomAI")) parts.push("RoomAI 正在思考…");
-    if (members.length > 0) parts.push(`${members.join("、")} 正在输入…`);
-    return parts.join(" · ");
-  })();
 
   return <main className="room">
     <div className={`side-scrim ${sidebarOpen ? "visible" : ""}`} onClick={() => setSidebarOpen(false)} />
@@ -1364,12 +1449,29 @@ export default function RoomPage() {
           {prepOpen && <ol className="prep-body">{room.prep_checklist.map((question) => <li key={question}>{question}</li>)}</ol>}
         </div>}
 
-        <div className="msg-list" ref={listRef} onScroll={onScroll}>
-          {loadingOlder ? <div className="msg-start">正在加载更早的消息…</div> : hasOlder ? <div className="msg-start">上滑加载更早的消息</div> : <div className="msg-start">讨论从这里开始</div>}
-          {filteredMessages.map((message, index) => {
+        <Virtuoso
+          ref={virtuosoRef}
+          className="msg-list"
+          data={filteredMessages}
+          firstItemIndex={firstItemIndex}
+          // 未渲染项的估算高度：不设时 Virtuoso 会“探测”第一项的高度来估算，
+          // 但第一项带日期分割线（约 155px，比普通消息高 65px），估算偏大，
+          // 上滑 prepend 后锚点漂移约 200px/页。普通消息约 90px，设 100 留余量。
+          defaultItemHeight={100}
+          computeItemKey={(_index, message) => message.id}
+          overscan={400}
+          atBottomThreshold={120}
+          rangeChanged={handleRangeChanged}
+          atBottomStateChange={handleAtBottomChange}
+          components={listComponents}
+          itemContent={(index, message) => {
+            // 注意：index 是绝对索引（firstItemIndex + 数据下标），直接拿它去
+            // 下标 filteredMessages 会越界（previous 永远是 undefined），导致
+            // 日期分割线每条都显示、连续消息的头像也不隐藏。先换算成数据下标。
+            const dataIndex = index - firstItemIndex;
             const own = message.visitor_id === identity.visitor_id;
             const isAgentMessage = message.sender_type === "agent" || message.sender_name === "RoomAI";
-            const previous = filteredMessages[index - 1];
+            const previous = filteredMessages[dataIndex - 1];
             const showAuthor = !previous || previous.sender_name !== message.sender_name || new Date(message.created_at).getTime() - new Date(previous.created_at).getTime() > 5 * 60 * 1000;
             const showDateDivider = !previous || localDayKey(previous.created_at) !== localDayKey(message.created_at);
             const messageTodos = (message.todo_ids || []).map((todoId) => todos.find((todo) => todo.id === todoId)).filter((todo): todo is Todo => Boolean(todo));
@@ -1398,18 +1500,10 @@ export default function RoomPage() {
               </div>
             </article>
             </Fragment>;
-          })}
-          {streamingMessages.filter((item) => item.content).map((item) => <article className="msg msg-agent-streaming" key={item.stream_id}>
-            <div className="avatar msg-avatar avatar-ai"><BrandMark /></div>
-            <div className="msg-main"><div className="msg-meta"><b className="agent-name">RoomAI</b><i className="tag-ai">AI</i><time>{formatTime(item.created_at)}</time></div>
-              <div className="msg-body"><MarkdownContent content={item.content} /><i className="stream-cursor" aria-hidden="true" /></div>
-            </div>
-          </article>)}
-          {typingNames.length > 0 && <div className="typing"><span className="typing-dots"><i /><i /><i /></span>{typingText}{thinkingSince !== null && typingNames.includes("RoomAI") && <span className="typing-timer">· <ThinkingTimer since={thinkingSince} /></span>}</div>}
-          <div ref={bottomRef} />
-        </div>
+          }}
+        />
 
-        {!nearBottom && newMessages && <button className="new-msg-btn" onClick={() => { if (viewingOldWindowRef.current) void reloadLatest(); else setNearBottom(true); }}>有新消息 <ArrowDown size={14} /></button>}
+        {!nearBottom && newMessages && <button className="new-msg-btn" onClick={() => { if (viewingOldWindowRef.current) void reloadLatest(); else { setNearBottom(true); scrollToBottom(); } }}>有新消息 <ArrowDown size={14} /></button>}
         {error && <div className="alert"><span>{error}</span><button onClick={() => setError("")} aria-label="关闭"><X size={14} /></button></div>}
         {toast && <div className="toast"><Check size={13} /><span>{toast}</span></div>}
         {menu && <>

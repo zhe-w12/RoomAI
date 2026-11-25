@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from ..database import database
 from .diagram import DIAGRAM_TYPES, generate_mermaid_diagram
 
 
@@ -75,6 +77,63 @@ async def _handle_diagram(ctx: ToolContext, args: dict) -> ToolResult:
     return ToolResult(content=content, attachment=f"```mermaid\n{result['code']}\n```")
 
 
+# search_history 返回的单条消息最多展示多少字，避免一次塞太多上下文。
+_SEARCH_EXCERPT_CHARS = 300
+_SEARCH_MAX_RESULTS = 10
+
+
+def _escape_like(term: str) -> str:
+    """Escape LIKE wildcards so a user keyword is matched literally."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def _handle_search_history(ctx: ToolContext, args: dict) -> ToolResult:
+    """Search the room's full message history by keyword (memory layer 4).
+
+    Scoped to the current room only; recalled messages are excluded.
+    Returns plain text the model can quote directly — no attachment.
+    """
+    if not ctx.session_id:
+        return ToolResult(content="搜索失败：没有房间上下文。")
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return ToolResult(content="参数错误：query 不能为空，请给出一两个关键词，例如“小程序成本”。")
+    query = query[:200]
+    try:
+        limit = int(args.get("limit") or 5)
+    except (TypeError, ValueError):
+        limit = 5
+    limit = max(1, min(limit, _SEARCH_MAX_RESULTS))
+    # Split on whitespace; a single Chinese phrase stays one term (substring match).
+    terms = [term for term in re.split(r"\s+", query) if term][:5]
+    conditions = " OR ".join("content LIKE ? ESCAPE '\\' OR image_summary LIKE ? ESCAPE '\\'" for _ in terms)
+    parameters: list[object] = [ctx.session_id]
+    for term in terms:
+        pattern = f"%{_escape_like(term)}%"
+        parameters.extend((pattern, pattern))
+    parameters.append(limit)
+    with database() as connection:
+        rows = connection.execute(
+            f"""SELECT sender_name, sender_type, content, image_summary, created_at
+                FROM messages
+                WHERE session_id = ? AND is_recalled = 0 AND ({conditions})
+                ORDER BY id DESC LIMIT ?""",
+            parameters,
+        ).fetchall()
+    if not rows:
+        return ToolResult(content=f"在全量历史消息里没有找到包含“{query}”的内容。可以换个关键词再试一次。")
+    lines = [f"在历史消息中找到 {len(rows)} 条与“{query}”相关的内容（按时间从近到远）："]
+    for row in rows:
+        text = str(row["content"] or "") or str(row["image_summary"] or "")
+        excerpt = text[:_SEARCH_EXCERPT_CHARS]
+        if len(text) > _SEARCH_EXCERPT_CHARS:
+            excerpt += "…"
+        role = "RoomAI" if row["sender_type"] == "agent" else str(row["sender_name"])
+        created = str(row["created_at"] or "")[:16].replace("T", " ")
+        lines.append(f"【{role} · {created}】{excerpt}")
+    return ToolResult(content="\n".join(lines))
+
+
 TOOL_REGISTRY: dict[str, ToolDefinition] = {
     "generate_mermaid_diagram": ToolDefinition(
         name="generate_mermaid_diagram",
@@ -101,6 +160,31 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
             "required": ["subject"],
         },
         handler=_handle_diagram,
+    ),
+    "search_history": ToolDefinition(
+        name="search_history",
+        description=(
+            "按关键词搜索当前房间的全量历史消息（记忆的第 4 层）。"
+            "当用户问起之前讨论过的内容，而你手头的最近消息和滚动总结里没有时调用，"
+            "例如“之前说的成本是多少”“最早是谁提的这个想法”“上次投票结果是什么”。"
+            "只搜索当前房间，不跨房间；已撤回的消息不会出现。返回匹配消息的发送人、时间和内容节选，"
+            "最多 10 条。最近消息里已经有的内容不要调用这个工具。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索关键词，一两个词即可，例如“小程序成本”“投票结果”。不要写完整句子。",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "最多返回几条，默认 5，上限 10。",
+                },
+            },
+            "required": ["query"],
+        },
+        handler=_handle_search_history,
     ),
 }
 

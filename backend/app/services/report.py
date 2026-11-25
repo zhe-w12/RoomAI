@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import re
 from io import BytesIO
@@ -343,4 +344,123 @@ def markdown_to_docx(markdown: str) -> bytes:
         index += 1
     output = BytesIO()
     document.save(output)
+    return output.getvalue()
+
+
+# PDF 导出的页面样式：A4，中文字体优先用 Noto Sans CJK SC（Linux 服务器常见），
+# 其次微软雅黑（Windows / 已装该字体的环境），再退回系统无衬线字体。
+# 字体缺失时 WeasyPrint 会退回默认字体导致中文变方框，部署时需确认字体已装。
+_PDF_CSS = """
+@page {
+  size: A4;
+  margin: 2cm 1.8cm;
+  @bottom-center { content: "第 " counter(page) " 页 / 共 " counter(pages) " 页"; font-size: 8pt; color: #9db1c7; }
+}
+body { font-family: "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif; font-size: 11pt; line-height: 1.75; color: #10233f; }
+h1 { font-size: 20pt; color: #1d4ed8; border-bottom: 2px solid #2563eb; padding-bottom: 8px; margin: 0 0 0.6em; }
+h2 { font-size: 14pt; color: #1d4ed8; margin: 1.4em 0 0.5em; }
+h3 { font-size: 12pt; color: #10233f; margin: 1.2em 0 0.4em; }
+p { margin: 0.4em 0; }
+ul, ol { margin: 0.4em 0; padding-left: 1.4em; }
+li { margin: 0.2em 0; }
+hr { border: none; border-top: 1px solid #dce8f5; margin: 1.6em 0; }
+table { border-collapse: collapse; width: 100%; margin: 0.8em 0; font-size: 10pt; }
+th, td { border: 1px solid #dce8f5; padding: 6px 8px; text-align: left; }
+th { background: #eff6ff; color: #1d4ed8; }
+pre { background: #f5f9fd; border: 1px solid #e9f1f9; border-radius: 6px; padding: 10px 12px; font-size: 9pt; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+pre .lang { display: block; color: #6b8299; font-size: 8pt; margin-bottom: 4px; }
+code { font-family: "JetBrains Mono", "Noto Sans Mono CJK SC", monospace; font-size: 0.9em; background: #f5f9fd; padding: 1px 4px; border-radius: 4px; }
+pre code { background: none; padding: 0; }
+"""
+
+
+def _inline_html(text: str) -> str:
+    """行内格式：先转义，再把 **粗体** 和 `代码` 换成标签。"""
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    return escaped
+
+
+def _markdown_to_html_body(markdown: str) -> str:
+    """行式 Markdown 转 HTML 片段，结构与 markdown_to_docx 对齐（标题、表格、
+    列表、代码块、分隔线）。代码块在 Word 导出里是跳过的，PDF 里保留为 <pre>，
+    否则纪要里的方案图（mermaid 源码）会整段丢失。"""
+    lines = markdown.splitlines()
+    parts: list[str] = []
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        line = raw.strip()
+        if line.startswith("```"):
+            language = line[3:].strip()
+            code_lines: list[str] = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code_lines.append(lines[index])
+                index += 1
+            index += 1  # 跳过结尾的 ```
+            label = f'<span class="lang">{html.escape(language)}</span>' if language else ""
+            parts.append(f"<pre>{label}<code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+            continue
+        if not line:
+            index += 1
+            continue
+        if line in ("---", "***", "___"):
+            parts.append("<hr>")
+            index += 1
+            continue
+        if line.startswith("|"):
+            table_rows: list[list[str]] = []
+            while index < len(lines) and lines[index].strip().startswith("|"):
+                cells = [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+                if cells and not all(re.fullmatch(r"[-: ]+", cell or "-") for cell in cells):
+                    table_rows.append(cells)
+                index += 1
+            if table_rows:
+                rows_html = []
+                for row_index, values in enumerate(table_rows):
+                    tag = "th" if row_index == 0 else "td"
+                    cells_html = "".join(f"<{tag}>{_inline_html(v)}</{tag}>" for v in values)
+                    rows_html.append(f"<tr>{cells_html}</tr>")
+                parts.append(f"<table>{''.join(rows_html)}</table>")
+            continue
+        if line.startswith("# "):
+            parts.append(f"<h1>{_inline_html(line[2:])}</h1>")
+        elif line.startswith("## "):
+            parts.append(f"<h2>{_inline_html(line[3:])}</h2>")
+        elif line.startswith("### "):
+            parts.append(f"<h3>{_inline_html(line[4:])}</h3>")
+        elif line.startswith("- "):
+            items: list[str] = []
+            while index < len(lines) and lines[index].strip().startswith("- "):
+                items.append(f"<li>{_inline_html(lines[index].strip()[2:])}</li>")
+                index += 1
+            parts.append(f"<ul>{''.join(items)}</ul>")
+            continue
+        elif re.match(r"^\d+\.\s", line):
+            items = []
+            while index < len(lines) and re.match(r"^\d+\.\s", lines[index].strip()):
+                items.append(f"<li>{_inline_html(re.sub(r'^\\d+\\.\\s', '', lines[index].strip()))}</li>")
+                index += 1
+            parts.append(f"<ol>{''.join(items)}</ol>")
+            continue
+        else:
+            parts.append(f"<p>{_inline_html(line)}</p>")
+        index += 1
+    return "\n".join(parts)
+
+
+def markdown_to_pdf(markdown: str) -> bytes:
+    """纪要 Markdown 转 PDF（WeasyPrint + HTML 模板）。weasyprint 延迟导入：
+    没装时抛 ImportError，由调用方转成 501；且不拖慢后端启动。"""
+    from weasyprint import HTML
+
+    document = (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        f"<style>{_PDF_CSS}</style></head><body>"
+        f"{_markdown_to_html_body(markdown)}</body></html>"
+    )
+    output = BytesIO()
+    HTML(string=document).write_pdf(output)
     return output.getvalue()
